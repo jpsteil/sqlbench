@@ -36,10 +36,13 @@ dependencies = [
 mysql = ["mysql-connector-python>=8.0.0"]
 postgresql = ["psycopg2-binary>=2.9.0"]
 ibmi = ["pyodbc>=4.0.0"]
+export = ["reportlab>=4.0.0", "openpyxl>=3.1.0"]
 all = [
     "mysql-connector-python>=8.0.0",
     "psycopg2-binary>=2.9.0",
     "pyodbc>=4.0.0",
+    "reportlab>=4.0.0",
+    "openpyxl>=3.1.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -51,9 +54,9 @@ dev = [
 sqlbench = "sqlbench.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/jim/sqlbench"
-Repository = "https://github.com/jim/sqlbench"
-Issues = "https://github.com/jim/sqlbench/issues"
+Homepage = "https://github.com/jpsteil/sqlbench"
+Repository = "https://github.com/jpsteil/sqlbench"
+Issues = "https://github.com/jpsteil/sqlbench/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sqlbench"]
