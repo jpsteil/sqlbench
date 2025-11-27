@@ -1,12 +1,12 @@
-# Byte-compiled / optimized / DLL files
+# Virtual environment
+venv/
+.venv/
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -24,36 +24,8 @@ wheels/
 .installed.cfg
 *.egg
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+# SQLite database
+*.db
 
 # IDE
 .idea/
@@ -62,12 +34,10 @@ venv.bak/
 *.swo
 *~
 
-# Database files
-*.db
-
-# Application data
-*.json
-
-# OS files
+# OS
 .DS_Store
 Thumbs.db
+
+# Environment variables
+.env
+.env.local
