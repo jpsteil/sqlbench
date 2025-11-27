@@ -1,0 +1,5 @@
+pyodbc
+reportlab
+openpyxl
+mysql-connector-python
+psycopg2-binary

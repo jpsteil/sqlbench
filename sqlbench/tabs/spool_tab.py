@@ -1,0 +1,572 @@
+"""Spool file utility tab."""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import threading
+import subprocess
+import tempfile
+import platform
+
+
+class SpoolTab:
+    def __init__(self, parent, app, connection, conn_name, os_version):
+        self.app = app
+        self.connection = connection
+        self.conn_name = conn_name
+        self.os_version = os_version
+        self.frame = ttk.Frame(parent)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+        self._running = False
+        self._current_spool_info = None  # Store spool file info for PDF export
+        self._create_widgets()
+
+    def _create_widgets(self):
+        # Top controls
+        ctrl_frame = ttk.Frame(self.frame)
+        ctrl_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(ctrl_frame, text="User:").pack(side=tk.LEFT, padx=(0, 5))
+        self.user_entry = ttk.Entry(ctrl_frame, width=15)
+        self.user_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.user_entry.insert(0, "*CURRENT")
+
+        self.refresh_btn = ttk.Button(ctrl_frame, text="Refresh", command=self._refresh_spool_files)
+        self.refresh_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(ctrl_frame, text="View", command=self._view_spool_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(ctrl_frame, text="Delete", command=self._delete_spool_files).pack(side=tk.LEFT, padx=2)
+
+        # Connection info label
+        ttk.Label(ctrl_frame, text=f"  [{self.conn_name}]").pack(side=tk.RIGHT, padx=5)
+
+        # Paned window for list and viewer
+        self.paned = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
+        self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Spool file list
+        list_frame = ttk.LabelFrame(self.paned, text="Spool Files")
+        self.paned.add(list_frame, weight=1)
+
+        columns = ("file", "user", "job", "filenumber", "status", "pages")
+        self.spool_tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="extended")
+
+        self.spool_tree.heading("file", text="File")
+        self.spool_tree.heading("user", text="User")
+        self.spool_tree.heading("job", text="Job")
+        self.spool_tree.heading("filenumber", text="File #")
+        self.spool_tree.heading("status", text="Status")
+        self.spool_tree.heading("pages", text="Pages")
+
+        self.spool_tree.column("file", width=75, minwidth=50)
+        self.spool_tree.column("user", width=50, minwidth=35)
+        self.spool_tree.column("job", width=180, minwidth=100)
+        self.spool_tree.column("filenumber", width=40, minwidth=30, anchor="e")
+        self.spool_tree.column("status", width=45, minwidth=35)
+        self.spool_tree.column("pages", width=40, minwidth=30, anchor="e")
+
+        spool_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.spool_tree.yview)
+        self.spool_tree.configure(yscrollcommand=spool_scroll.set)
+
+        spool_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.spool_tree.pack(fill=tk.BOTH, expand=True)
+
+        self.spool_tree.bind("<Double-1>", lambda e: self._view_spool_file())
+
+        # Viewer area
+        viewer_frame = ttk.LabelFrame(self.paned, text="Viewer")
+        self.paned.add(viewer_frame, weight=2)
+
+        # Viewer button bar
+        viewer_btn_frame = ttk.Frame(viewer_frame)
+        viewer_btn_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
+
+        self.save_pdf_btn = ttk.Button(viewer_btn_frame, text="Save PDF", command=self._save_pdf, state=tk.DISABLED)
+        self.save_pdf_btn.pack(side=tk.LEFT, padx=2)
+        self.print_btn = ttk.Button(viewer_btn_frame, text="Print", command=self._print_spool, state=tk.DISABLED)
+        self.print_btn.pack(side=tk.LEFT, padx=2)
+
+        self.viewer_text = tk.Text(viewer_frame, wrap=tk.NONE, font=("Courier", 10))
+        viewer_scroll_y = ttk.Scrollbar(viewer_frame, orient=tk.VERTICAL, command=self.viewer_text.yview)
+        viewer_scroll_x = ttk.Scrollbar(viewer_frame, orient=tk.HORIZONTAL, command=self.viewer_text.xview)
+        self.viewer_text.configure(yscrollcommand=viewer_scroll_y.set, xscrollcommand=viewer_scroll_x.set)
+
+        viewer_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        viewer_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.viewer_text.pack(fill=tk.BOTH, expand=True)
+
+    def _set_running(self, running):
+        """Update UI state for running/not running."""
+        self._running = running
+        if running:
+            self.refresh_btn.config(state=tk.DISABLED)
+            self.app.root.config(cursor="watch")
+        else:
+            self.refresh_btn.config(state=tk.NORMAL)
+            self.app.root.config(cursor="")
+
+    def _refresh_spool_files(self):
+        if self._running:
+            return
+
+        user = self.user_entry.get().strip().upper() or "*CURRENT"
+        self.user_entry.delete(0, tk.END)
+        self.user_entry.insert(0, user)
+
+        # Clear current list
+        self.spool_tree.delete(*self.spool_tree.get_children())
+
+        self._set_running(True)
+        self.app.statusbar.config(text=f"Loading spool files from {self.conn_name}...")
+
+        thread = threading.Thread(target=self._fetch_spool_files, args=(user,), daemon=True)
+        thread.start()
+
+    def _fetch_spool_files(self, user):
+        """Fetch spool files in background thread."""
+        try:
+            cursor = self.connection.cursor()
+
+            sql = """
+                SELECT
+                    SPOOLED_FILE_NAME,
+                    USER_NAME,
+                    JOB_NAME,
+                    FILE_NUMBER,
+                    STATUS,
+                    TOTAL_PAGES
+                FROM QSYS2.OUTPUT_QUEUE_ENTRIES
+                WHERE USER_NAME = CASE WHEN ? = '*CURRENT' THEN USER ELSE ? END
+                ORDER BY CREATE_TIMESTAMP DESC
+                FETCH FIRST 100 ROWS ONLY
+            """
+            cursor.execute(sql, (user, user))
+            rows = cursor.fetchall()
+            cursor.close()
+
+            self.app.root.after(0, self._display_spool_files, rows, user)
+        except Exception as e:
+            self.app.root.after(0, self._spool_error, str(e))
+        finally:
+            self.app.root.after(0, self._set_running, False)
+
+    def _display_spool_files(self, rows, user):
+        """Display spool files in treeview (called from main thread)."""
+        for row in rows:
+            clean_row = tuple(str(v) if v is not None else "" for v in row)
+            self.spool_tree.insert("", tk.END, values=clean_row)
+        self.app.statusbar.config(text=f"Loaded {len(rows)} spool files for {user} on {self.conn_name}")
+
+    def _spool_error(self, error):
+        """Handle spool file errors."""
+        messagebox.showerror("Error", error)
+
+    def _view_spool_file(self):
+        selection = self.spool_tree.selection()
+        if not selection:
+            messagebox.showinfo("Select", "Please select a spool file to view.")
+            return
+
+        item = self.spool_tree.item(selection[0])
+        values = item["values"]
+        file_name = values[0]
+        qualified_job = values[2]  # Already in "number/user/name" format
+        file_number = values[3]
+
+        # Parse job name from qualified job (format: number/user/name)
+        job_parts = qualified_job.split("/")
+        job_name = job_parts[2] if len(job_parts) == 3 else qualified_job
+
+        try:
+            cursor = self.connection.cursor()
+
+            # Get spool file attributes for proper page formatting
+            attr_sql = """
+                SELECT PAGE_LENGTH, PAGE_WIDTH, LPI, CPI
+                FROM QSYS2.OUTPUT_QUEUE_ENTRIES
+                WHERE JOB_NAME = ?
+                  AND SPOOLED_FILE_NAME = ?
+                  AND FILE_NUMBER = ?
+            """
+            cursor.execute(attr_sql, (qualified_job, file_name, int(file_number)))
+            attr_row = cursor.fetchone()
+
+            page_length = 66  # Default
+            page_width = 132  # Default
+            if attr_row:
+                page_length = attr_row[0] or 66
+                page_width = attr_row[1] or 132
+
+            # Save info for PDF export
+            self._current_spool_info = {
+                "file_name": file_name,
+                "job_name": job_name,
+                "file_number": file_number,
+                "page_length": page_length,
+                "page_width": page_width
+            }
+
+            # Read spool file content using SYSTOOLS.SPOOLED_FILE_DATA
+            sql = """
+                SELECT SPOOLED_DATA
+                FROM TABLE(SYSTOOLS.SPOOLED_FILE_DATA(
+                    JOB_NAME => ?,
+                    SPOOLED_FILE_NAME => ?,
+                    SPOOLED_FILE_NUMBER => ?
+                ))
+            """
+            cursor.execute(sql, (qualified_job, file_name, int(file_number)))
+
+            self.viewer_text.delete("1.0", tk.END)
+
+            # Store raw lines for PDF generation
+            raw_lines = []
+            for row in cursor.fetchall():
+                line = row[0] if row[0] else ""
+                # Clean control characters but keep printable ASCII and common chars
+                clean_line = ''.join(c if (c.isprintable() or c in '\t') else ' ' for c in line)
+                raw_lines.append(clean_line)
+                self.viewer_text.insert(tk.END, clean_line + "\n")
+
+            # Store lines in spool info for PDF
+            self._current_spool_info["lines"] = raw_lines
+
+            cursor.close()
+            self._update_viewer_buttons()
+            self.app.statusbar.config(text=f"Loaded spool file {file_name} ({page_width}x{page_length}, {len(raw_lines)} lines) from {self.conn_name}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read spool file: {e}")
+
+    def _delete_spool_files(self):
+        """Delete selected spool files."""
+        selection = self.spool_tree.selection()
+        if not selection:
+            messagebox.showinfo("Select", "Please select spool file(s) to delete.")
+            return
+
+        # Build list of files to delete
+        files_to_delete = []
+        for item_id in selection:
+            item = self.spool_tree.item(item_id)
+            values = item["values"]
+            files_to_delete.append({
+                "file_name": values[0],
+                "job": values[2],
+                "file_number": values[3]
+            })
+
+        # Confirmation
+        count = len(files_to_delete)
+        if count == 1:
+            msg = f"Delete spool file '{files_to_delete[0]['file_name']}'?"
+        else:
+            msg = f"Delete {count} selected spool files?"
+
+        if not messagebox.askyesno("Confirm Delete", msg):
+            return
+
+        # Delete in background thread
+        self._set_running(True)
+        self.app.statusbar.config(text=f"Deleting {count} spool file(s)...")
+        thread = threading.Thread(target=self._do_delete_spool_files, args=(files_to_delete,), daemon=True)
+        thread.start()
+
+    def _do_delete_spool_files(self, files_to_delete):
+        """Delete spool files in background thread."""
+        deleted = 0
+        errors = []
+
+        try:
+            cursor = self.connection.cursor()
+
+            for f in files_to_delete:
+                try:
+                    # Parse job name (format: number/user/name)
+                    job_parts = f["job"].split("/")
+                    if len(job_parts) == 3:
+                        job_number, job_user, job_name = job_parts
+                    else:
+                        job_name = f["job"]
+                        job_user = "*N"
+                        job_number = "*N"
+
+                    # Build DLTSPLF command
+                    cmd = f"DLTSPLF FILE({f['file_name']}) JOB({job_number}/{job_user}/{job_name}) SPLNBR({f['file_number']})"
+
+                    cursor.execute("CALL QSYS2.QCMDEXC(?)", (cmd,))
+                    deleted += 1
+                except Exception as e:
+                    errors.append(f"{f['file_name']}: {e}")
+
+            cursor.close()
+        except Exception as e:
+            errors.append(str(e))
+
+        # Update UI on main thread
+        self.app.root.after(0, self._delete_complete, deleted, errors)
+
+    def _delete_complete(self, deleted, errors):
+        """Handle delete completion on main thread."""
+        self._set_running(False)
+
+        if errors:
+            error_msg = "\n".join(errors[:5])  # Show first 5 errors
+            if len(errors) > 5:
+                error_msg += f"\n... and {len(errors) - 5} more errors"
+            messagebox.showerror("Delete Errors", f"Deleted {deleted} file(s).\n\nErrors:\n{error_msg}")
+        else:
+            self.app.statusbar.config(text=f"Deleted {deleted} spool file(s) from {self.conn_name}")
+
+        # Refresh list
+        self._refresh_spool_files()
+
+    def _generate_pdf(self, content, file_path):
+        """Generate a PDF from content using spool file attributes."""
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.lib.units import inch
+        from reportlab.pdfgen import canvas
+
+        # Get spool file attributes and stored lines
+        spool_page_length = 66  # Default lines per page
+        spool_page_width = 132  # Default chars per line
+        lines = None
+
+        if self._current_spool_info:
+            spool_page_length = self._current_spool_info.get("page_length", 66)
+            spool_page_width = self._current_spool_info.get("page_width", 132)
+            lines = self._current_spool_info.get("lines")
+
+        # Fall back to parsing content if no stored lines
+        if not lines:
+            lines = content.split("\n")
+
+        # Use landscape if spool file is wider than 80 characters
+        if spool_page_width > 80:
+            pagesize = landscape(letter)
+            font_size = 6.5  # Smaller to fit 132 chars
+        else:
+            pagesize = letter
+            font_size = 10
+
+        c = canvas.Canvas(file_path, pagesize=pagesize)
+        width, height = pagesize
+
+        # Calculate margins
+        left_margin = 0.3 * inch
+        top_margin = 0.3 * inch
+        bottom_margin = 0.3 * inch
+        usable_height = height - top_margin - bottom_margin
+
+        # Calculate line height to fit spool_page_length lines on the page
+        line_height = usable_height / spool_page_length
+
+        # Starting y position (from top of usable area)
+        start_y = height - top_margin - font_size
+
+        c.setFont("Courier", font_size)
+        y = start_y
+        line_on_page = 0
+
+        for line in lines:
+            # Check if we've reached the spool file's page length
+            if line_on_page >= spool_page_length:
+                c.showPage()
+                c.setFont("Courier", font_size)
+                y = start_y
+                line_on_page = 0
+
+            # Truncate long lines to page width
+            if len(line) > spool_page_width:
+                line = line[:spool_page_width]
+
+            c.drawString(left_margin, y, line)
+            y -= line_height
+            line_on_page += 1
+
+        c.save()
+        return True
+
+    def _save_pdf(self):
+        """Save the current viewer content as PDF."""
+        content = self.viewer_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showwarning("Empty", "No spool file content to save.")
+            return
+
+        # Generate filename from job name and file number
+        if self._current_spool_info:
+            job_name = self._current_spool_info.get("job_name", "spool")
+            file_number = self._current_spool_info.get("file_number", "0")
+            default_name = f"{job_name}_{file_number}.pdf"
+        else:
+            default_name = "spoolfile.pdf"
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+            initialfile=default_name
+        )
+
+        if not file_path:
+            return
+
+        try:
+            self._generate_pdf(content, file_path)
+            self.app.statusbar.config(text=f"Saved PDF: {file_path}")
+            if messagebox.askyesno("Saved", f"PDF saved to:\n{file_path}\n\nOpen the PDF now?"):
+                self._open_file(file_path)
+        except ImportError:
+            messagebox.showerror("Error", "reportlab not installed. Run: pip install reportlab")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save PDF: {e}")
+
+    def _open_file(self, file_path):
+        """Open file with system default application."""
+        try:
+            system = platform.system()
+            if system == "Darwin":
+                subprocess.run(["open", file_path], check=True)
+            elif system == "Windows":
+                import os
+                os.startfile(file_path)
+            else:  # Linux and others
+                subprocess.run(["xdg-open", file_path], check=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file: {e}")
+
+    def _update_viewer_buttons(self):
+        """Enable/disable viewer buttons based on content."""
+        content = self.viewer_text.get("1.0", tk.END).strip()
+        state = tk.NORMAL if content else tk.DISABLED
+        self.save_pdf_btn.config(state=state)
+        self.print_btn.config(state=state)
+
+    def _print_spool(self):
+        """Print the current viewer content."""
+        content = self.viewer_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showwarning("Empty", "No spool file content to print.")
+            return
+
+        # Show print dialog
+        self._show_print_dialog(content)
+
+    def _get_printers(self):
+        """Get list of available printers."""
+        printers = []
+        default = None
+        system = platform.system()
+        try:
+            if system in ("Linux", "Darwin"):
+                # Use lpstat to get printer list
+                result = subprocess.run(["lpstat", "-a"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        if line:
+                            # Format: "printer_name accepting requests..."
+                            printer = line.split()[0]
+                            printers.append(printer)
+                # Get default printer
+                result = subprocess.run(["lpstat", "-d"], capture_output=True, text=True)
+                if result.returncode == 0 and ":" in result.stdout:
+                    default = result.stdout.split(":")[1].strip()
+            elif system == "Windows":
+                # Use PowerShell to get printers (more reliable than wmic)
+                result = subprocess.run(
+                    ["powershell", "-Command", "Get-Printer | Select-Object -ExpandProperty Name"],
+                    capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        if line.strip():
+                            printers.append(line.strip())
+                # Get default printer
+                result = subprocess.run(
+                    ["powershell", "-Command", "(Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\").Name"],
+                    capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    default = result.stdout.strip()
+        except Exception:
+            pass
+        return printers, default
+
+    def _show_print_dialog(self, content):
+        """Show a print dialog to select printer."""
+        printers, default = self._get_printers()
+
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Print")
+        dialog.geometry("350x200")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+
+        # Printer selection
+        ttk.Label(dialog, text="Select Printer:").pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+        printer_var = tk.StringVar()
+        if printers:
+            printer_combo = ttk.Combobox(dialog, textvariable=printer_var, values=printers, state="readonly", width=40)
+            printer_combo.pack(padx=10, pady=5)
+            if default and default in printers:
+                printer_combo.set(default)
+            elif printers:
+                printer_combo.set(printers[0])
+        else:
+            ttk.Label(dialog, text="No printers found. Using system default.").pack(padx=10, pady=5)
+
+        # Copies
+        copies_frame = ttk.Frame(dialog)
+        copies_frame.pack(fill=tk.X, padx=10, pady=10)
+        ttk.Label(copies_frame, text="Copies:").pack(side=tk.LEFT)
+        copies_var = tk.StringVar(value="1")
+        copies_spin = ttk.Spinbox(copies_frame, from_=1, to=99, width=5, textvariable=copies_var)
+        copies_spin.pack(side=tk.LEFT, padx=5)
+
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=20)
+
+        def do_print():
+            dialog.destroy()
+            self._send_to_printer(content, printer_var.get() if printers else None, int(copies_var.get()))
+
+        ttk.Button(btn_frame, text="Print", command=do_print).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+
+    def _send_to_printer(self, content, printer, copies):
+        """Send content to the specified printer by generating a PDF first."""
+        try:
+            # Generate PDF to temp file
+            temp_path = tempfile.mktemp(suffix='.pdf')
+            self._generate_pdf(content, temp_path)
+
+            system = platform.system()
+            if system in ("Linux", "Darwin"):
+                cmd = ["lp", "-n", str(copies)]
+                if printer:
+                    cmd.extend(["-d", printer])
+                cmd.append(temp_path)
+                subprocess.run(cmd, check=True)
+                self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
+            elif system == "Windows":
+                import os
+                # Print PDF using default handler
+                for _ in range(copies):
+                    os.startfile(temp_path, "print")
+                self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
+        except ImportError:
+            messagebox.showerror("Error", "reportlab not installed. Run: pip install reportlab")
+        except FileNotFoundError:
+            messagebox.showerror("Error", "Print command not found.\nEnsure CUPS (Linux/Mac) is available.")
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Error", f"Print failed: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not print: {e}")
+
+    def get_user(self):
+        """Get current user filter."""
+        return self.user_entry.get().strip()
+
+    def set_user(self, user):
+        """Set user filter."""
+        self.user_entry.delete(0, tk.END)
+        self.user_entry.insert(0, user)

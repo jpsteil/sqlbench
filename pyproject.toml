@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sqlbench"
+version = "0.1.0"
+description = "A multi-database SQL workbench with support for IBM i, MySQL, and PostgreSQL"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Jim" }
+]
+keywords = ["sql", "database", "gui", "ibmi", "mysql", "postgresql", "workbench"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+]
+dependencies = [
+    "sqlparse>=0.5.0",
+]
+
+[project.optional-dependencies]
+mysql = ["mysql-connector-python>=8.0.0"]
+postgresql = ["psycopg2-binary>=2.9.0"]
+ibmi = ["pyodbc>=4.0.0"]
+all = [
+    "mysql-connector-python>=8.0.0",
+    "psycopg2-binary>=2.9.0",
+    "pyodbc>=4.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+sqlbench = "sqlbench.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/jim/sqlbench"
+Repository = "https://github.com/jim/sqlbench"
+Issues = "https://github.com/jim/sqlbench/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sqlbench"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
