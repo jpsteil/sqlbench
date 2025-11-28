@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sqlbench"
-version = "0.1.1"
+version = "0.1.2"
 description = "A multi-database SQL workbench with support for IBM i, MySQL, and PostgreSQL"
 readme = "README.md"
 license = "MIT"
@@ -60,6 +60,7 @@ Issues = "https://github.com/jpsteil/sqlbench/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sqlbench"]
+include = ["sqlbench/resources/*"]
 
 [tool.ruff]
 line-length = 100

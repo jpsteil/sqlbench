@@ -41,6 +41,9 @@ class SQLBenchApp:
         # Restore last connection and tabs after UI is ready
         self.root.after(100, self._restore_session)
 
+        # Check for updates in background
+        self.root.after(500, self._check_for_updates)
+
     def _create_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -939,8 +942,112 @@ class SQLBenchApp:
                 self.db.delete_connection(conn["id"])
             self._refresh_connections()
 
+    def _install_launcher(self):
+        """Install desktop launcher for the current OS."""
+        from sqlbench.launcher import create_launcher
+        try:
+            success = create_launcher()
+            if success:
+                tk.messagebox.showinfo(
+                    "Launcher Installed",
+                    "Desktop launcher installed successfully.\n\n"
+                    "You may need to log out and back in for it to appear in your application menu."
+                )
+            else:
+                tk.messagebox.showwarning(
+                    "Installation Failed",
+                    "Could not install desktop launcher for this operating system."
+                )
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to install launcher:\n{e}")
+
+    def _remove_launcher(self):
+        """Remove desktop launcher for the current OS."""
+        from sqlbench.launcher import remove_launcher
+        try:
+            success = remove_launcher()
+            if success:
+                tk.messagebox.showinfo(
+                    "Launcher Removed",
+                    "Desktop launcher removed successfully."
+                )
+            else:
+                tk.messagebox.showinfo(
+                    "No Launcher Found",
+                    "No desktop launcher was found to remove."
+                )
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to remove launcher:\n{e}")
+
+    def _check_for_updates(self):
+        """Check for updates in background."""
+        from sqlbench.version import check_for_updates, __version__
+
+        def on_update_check(has_update, latest_version):
+            if has_update:
+                self.root.after(0, lambda: self._show_update_dialog(latest_version))
+
+        check_for_updates(on_update_check)
+
+    def _show_update_dialog(self, latest_version):
+        """Show update available dialog."""
+        from sqlbench.version import __version__
+
+        result = tk.messagebox.askyesno(
+            "Update Available",
+            f"A new version of SQLBench is available.\n\n"
+            f"Installed: {__version__}\n"
+            f"Latest: {latest_version}\n\n"
+            f"Would you like to upgrade now?\n\n"
+            f"(This will run: pipx upgrade sqlbench)"
+        )
+
+        if result:
+            self._run_upgrade()
+
+    def _run_upgrade(self):
+        """Run pipx upgrade in background."""
+        import subprocess
+        import threading
+
+        def do_upgrade():
+            try:
+                result = subprocess.run(
+                    ["pipx", "upgrade", "sqlbench"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    self.root.after(0, lambda: tk.messagebox.showinfo(
+                        "Upgrade Complete",
+                        "SQLBench has been upgraded.\n\n"
+                        "Please restart the application to use the new version."
+                    ))
+                else:
+                    error = result.stderr or result.stdout or "Unknown error"
+                    self.root.after(0, lambda: tk.messagebox.showerror(
+                        "Upgrade Failed",
+                        f"Failed to upgrade:\n{error}"
+                    ))
+            except FileNotFoundError:
+                self.root.after(0, lambda: tk.messagebox.showerror(
+                    "Upgrade Failed",
+                    "pipx not found. Please upgrade manually:\n\n"
+                    "pipx upgrade sqlbench"
+                ))
+            except Exception as e:
+                self.root.after(0, lambda: tk.messagebox.showerror(
+                    "Upgrade Failed",
+                    f"Failed to upgrade:\n{e}"
+                ))
+
+        self.statusbar.config(text="Upgrading SQLBench...")
+        thread = threading.Thread(target=do_upgrade, daemon=True)
+        thread.start()
+
     def _show_about(self):
-        tk.messagebox.showinfo("About", "IBM i Utility\nVersion 0.2")
+        from sqlbench.version import __version__
+        tk.messagebox.showinfo("About", f"SQLBench v{__version__}\nMulti-database SQL Workbench")
 
     def _show_settings(self):
         """Show settings dialog."""
@@ -950,10 +1057,10 @@ class SQLBenchApp:
         settings_win.grab_set()
 
         # Center on parent
-        settings_win.geometry("300x150")
+        settings_win.geometry("350x200")
         settings_win.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() - 300) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - 150) // 2
+        x = self.root.winfo_x() + (self.root.winfo_width() - 350) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 200) // 2
         settings_win.geometry(f"+{x}+{y}")
 
         # Apply dark mode
@@ -968,7 +1075,7 @@ class SQLBenchApp:
 
         # Font size setting
         font_frame = ttk.Frame(settings_win)
-        font_frame.pack(fill=tk.X, padx=20, pady=20)
+        font_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
 
         ttk.Label(font_frame, text="Font Size:").pack(side=tk.LEFT)
 
@@ -976,6 +1083,16 @@ class SQLBenchApp:
         font_spin = ttk.Spinbox(font_frame, from_=6, to=24, width=5,
                                 textvariable=font_size_var)
         font_spin.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Desktop launcher
+        launcher_frame = ttk.Frame(settings_win)
+        launcher_frame.pack(fill=tk.X, padx=20, pady=10)
+
+        ttk.Label(launcher_frame, text="Desktop:").pack(side=tk.LEFT)
+        ttk.Button(launcher_frame, text="Install Launcher",
+                   command=self._install_launcher).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(launcher_frame, text="Remove Launcher",
+                   command=self._remove_launcher).pack(side=tk.LEFT, padx=(5, 0))
 
         # Buttons
         btn_frame = ttk.Frame(settings_win)
