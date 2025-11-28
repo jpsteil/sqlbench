@@ -15,8 +15,13 @@ from sqlbench.dialogs.regex_builder_dialog import RegexBuilderDialog
 
 class SQLBenchApp:
     def __init__(self):
-        self.root = tk.Tk()
+        # Set className for proper window manager integration (Linux/X11)
+        # This makes the app show as "SQLBench" in window lists and match the .desktop file
+        self.root = tk.Tk(className="sqlbench")
         self.root.title("SQLBench")
+
+        # Set window icon
+        self._set_window_icon()
 
         self.db = Database()
         self.connections = {}  # name -> {conn, adapter, db_type, version, info}
@@ -43,6 +48,19 @@ class SQLBenchApp:
 
         # Check for updates in background
         self.root.after(500, self._check_for_updates)
+
+    def _set_window_icon(self):
+        """Set the window icon from the bundled PNG."""
+        try:
+            from pathlib import Path
+            icon_path = Path(__file__).parent / "resources" / "sqlbench.png"
+            if icon_path.exists():
+                icon = tk.PhotoImage(file=str(icon_path))
+                self.root.iconphoto(True, icon)
+                # Keep a reference to prevent garbage collection
+                self._icon = icon
+        except Exception:
+            pass  # Silently fail if icon cannot be loaded
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
