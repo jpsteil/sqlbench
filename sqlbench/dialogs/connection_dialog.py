@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 
-from sqlbench.adapters import get_adapter_choices, get_adapter
+from sqlbench.adapters import get_adapter_choices, get_adapter, get_unavailable_adapters, ADAPTERS
 
 
 class ConnectionDialog:
@@ -89,20 +89,36 @@ class ConnectionDialog:
         # Database Type
         ttk.Label(detail_frame, text="Type:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.db_type_var = tk.StringVar(value="ibmi")
+        available_choices = get_adapter_choices()
         self.db_type_combo = ttk.Combobox(
             detail_frame,
             textvariable=self.db_type_var,
-            values=[choice[1] for choice in get_adapter_choices()],
+            values=[choice[1] for choice in available_choices],
             state="readonly",
             width=37
         )
         self.db_type_combo.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=5, pady=5)
         self.db_type_combo.bind("<<ComboboxSelected>>", self._on_type_change)
-        # Map display names to db_type keys
-        self._type_map = {choice[1]: choice[0] for choice in get_adapter_choices()}
-        self._type_map_reverse = {choice[0]: choice[1] for choice in get_adapter_choices()}
-        self.db_type_combo.set("IBM i")
+        # Map display names to db_type keys (available only)
+        self._type_map = {choice[1]: choice[0] for choice in available_choices}
+        self._type_map_reverse = {choice[0]: choice[1] for choice in available_choices}
+        # Set default to first available adapter
+        if available_choices:
+            self.db_type_combo.set(available_choices[0][1])
         row += 1
+
+        # Show unavailable adapters with install button
+        unavailable = get_unavailable_adapters()
+        if unavailable:
+            unavail_frame = ttk.Frame(detail_frame)
+            unavail_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
+            unavail_text = "Unavailable: " + ", ".join(f"{name}" for _, name, _ in unavailable)
+            ttk.Label(unavail_frame, text=unavail_text, foreground="gray").pack(side=tk.LEFT)
+            ttk.Button(
+                unavail_frame, text="Install...", width=8,
+                command=lambda: self._show_install_dialog(unavailable)
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            row += 1
 
         # Host
         ttk.Label(detail_frame, text="Host:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
@@ -184,10 +200,14 @@ class ConnectionDialog:
     def _refresh_list(self):
         self.conn_listbox.delete(0, tk.END)
         self._connections = self.db.get_connections()
+        available_types = {choice[0] for choice in get_adapter_choices()}
         for conn in self._connections:
             # Show type indicator
             db_type = conn.get("db_type", "ibmi")
             type_indicator = {"ibmi": "[i]", "mysql": "[M]", "postgresql": "[P]"}.get(db_type, "[?]")
+            # Mark unavailable connections
+            if db_type not in available_types:
+                type_indicator = "[!]"
             self.conn_listbox.insert(tk.END, f"{type_indicator} {conn['name']}")
 
     def _load_connection_by_name(self, name):
@@ -202,11 +222,25 @@ class ConnectionDialog:
         self.name_entry.delete(0, tk.END)
         self.name_entry.insert(0, conn["name"])
 
-        # Set database type
+        # Set database type - handle unavailable adapters
         db_type = conn.get("db_type", "ibmi")
-        display_name = self._type_map_reverse.get(db_type, "IBM i")
-        self.db_type_combo.set(display_name)
-        self._update_field_visibility()
+        display_name = self._type_map_reverse.get(db_type)
+        if display_name:
+            self.db_type_combo.set(display_name)
+            self._update_field_visibility()
+        else:
+            # Adapter not available - show warning and get install hint
+            adapter_cls = ADAPTERS.get(db_type)
+            if adapter_cls:
+                hint = adapter_cls.install_hint or f"Install {db_type} driver"
+                self.test_status.config(
+                    text=f"{adapter_cls.display_name} driver not installed. {hint}",
+                    foreground="orange"
+                )
+            # Still need to fill the form for display, use first available adapter for field visibility
+            available_choices = get_adapter_choices()
+            if available_choices:
+                self.db_type_combo.set(available_choices[0][1])
 
         self.host_entry.delete(0, tk.END)
         self.host_entry.insert(0, conn["host"])
@@ -247,7 +281,10 @@ class ConnectionDialog:
     def _new(self):
         self._current_id = None
         self.name_entry.delete(0, tk.END)
-        self.db_type_combo.set("IBM i")
+        # Set to first available adapter
+        available_choices = get_adapter_choices()
+        if available_choices:
+            self.db_type_combo.set(available_choices[0][1])
         self._update_field_visibility()
         self.host_entry.delete(0, tk.END)
         self.port_entry.delete(0, tk.END)
@@ -354,3 +391,78 @@ class ConnectionDialog:
         self.test_btn.config(state=tk.NORMAL)
         print(f"Connection test failed: {error}")  # Debug output
         self.test_status.config(text=f"Failed: {error}", foreground="red")
+
+    def _show_install_dialog(self, unavailable):
+        """Show dialog to install missing database drivers."""
+        import subprocess
+        import sys
+
+        dialog = tk.Toplevel(self.top)
+        dialog.title("Install Database Drivers")
+        dialog.geometry("400x380")
+        dialog.transient(self.top)
+        dialog.grab_set()
+
+        # Apply theme
+        if self.app and self.app.dark_mode_var.get():
+            dialog.configure(bg="#2b2b2b")
+
+        ttk.Label(dialog, text="Select drivers to install:").pack(pady=(10, 5))
+
+        # Create checkboxes for each unavailable driver
+        check_vars = {}
+        for db_type, name, hint in unavailable:
+            var = tk.BooleanVar(value=True)
+            check_vars[db_type] = var
+            frame = ttk.Frame(dialog)
+            frame.pack(fill=tk.X, padx=20, pady=2)
+            ttk.Checkbutton(frame, text=name, variable=var).pack(side=tk.LEFT)
+            ttk.Label(frame, text=f"({hint})", foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+
+        # Status area
+        status_text = tk.Text(dialog, height=8, width=45, state=tk.DISABLED)
+        status_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        def log_status(msg):
+            status_text.config(state=tk.NORMAL)
+            status_text.insert(tk.END, msg + "\n")
+            status_text.see(tk.END)
+            status_text.config(state=tk.DISABLED)
+            dialog.update()
+
+        def do_install():
+            install_btn.config(state=tk.DISABLED)
+            selected = [db_type for db_type, var in check_vars.items() if var.get()]
+            if not selected:
+                log_status("No drivers selected.")
+                install_btn.config(state=tk.NORMAL)
+                return
+
+            python = sys.executable
+            for db_type in selected:
+                extra = {"ibmi": "ibmi", "mysql": "mysql", "postgresql": "postgresql"}.get(db_type)
+                if extra:
+                    log_status(f"Installing sqlbench[{extra}]...")
+                    try:
+                        result = subprocess.run(
+                            [python, "-m", "pip", "install", f"sqlbench[{extra}]"],
+                            capture_output=True, text=True, timeout=120
+                        )
+                        if result.returncode == 0:
+                            log_status(f"  {extra}: OK")
+                        else:
+                            log_status(f"  {extra}: FAILED")
+                            log_status(result.stderr[:200] if result.stderr else "Unknown error")
+                    except subprocess.TimeoutExpired:
+                        log_status(f"  {extra}: TIMEOUT")
+                    except Exception as e:
+                        log_status(f"  {extra}: ERROR - {e}")
+
+            log_status("\nDone! Please restart SQLBench to use new drivers.")
+            install_btn.config(state=tk.NORMAL)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        install_btn = ttk.Button(btn_frame, text="Install Selected", command=lambda: threading.Thread(target=do_install, daemon=True).start())
+        install_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Close", command=dialog.destroy).pack(side=tk.LEFT, padx=5)

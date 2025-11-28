@@ -6,7 +6,7 @@ import tkinter.font as tkfont
 from tkinter import ttk
 
 from sqlbench.database import Database
-from sqlbench.adapters import get_adapter
+from sqlbench.adapters import get_adapter, ADAPTERS
 from sqlbench.tabs.sql_tab import SQLTab
 from sqlbench.tabs.spool_tab import SpoolTab
 from sqlbench.dialogs.connection_dialog import ConnectionDialog
@@ -602,11 +602,19 @@ class SQLBenchApp:
             self._connecting.discard(name)
             return
 
+        # Check if adapter is available
+        db_type = conn_info.get("db_type", "ibmi")
+        adapter_cls = ADAPTERS.get(db_type)
+        if adapter_cls and not adapter_cls.is_available():
+            hint = adapter_cls.install_hint or f"Install {db_type} driver"
+            self.statusbar.config(text=f"{adapter_cls.display_name} driver not installed. {hint}")
+            self._connecting.discard(name)
+            return
+
         self.statusbar.config(text=f"Connecting to {name}...")
 
         def do_connect():
             try:
-                db_type = conn_info.get("db_type", "ibmi")
                 adapter = get_adapter(db_type)
 
                 db_conn = adapter.connect(

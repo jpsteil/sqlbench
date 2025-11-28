@@ -11,6 +11,19 @@ class DBAdapter(ABC):
     default_port = None
     requires_database = False
     supports_spool = False
+    required_module = None  # Module name to import for this adapter
+    install_hint = None  # pip install hint for missing dependency
+
+    @classmethod
+    def is_available(cls):
+        """Check if the required module for this adapter is installed."""
+        if cls.required_module is None:
+            return True
+        try:
+            __import__(cls.required_module)
+            return True
+        except ImportError:
+            return False
 
     @abstractmethod
     def connect(self, host, user, password, port=None, database=None):
@@ -87,6 +100,8 @@ class IBMiAdapter(DBAdapter):
     default_port = None  # ODBC handles this
     requires_database = False
     supports_spool = True
+    required_module = "pyodbc"
+    install_hint = "pip install sqlbench[ibmi]"
 
     def connect(self, host, user, password, port=None, database=None):
         import pyodbc
@@ -168,6 +183,8 @@ class MySQLAdapter(DBAdapter):
     default_port = 3306
     requires_database = True
     supports_spool = False
+    required_module = "mysql.connector"
+    install_hint = "pip install sqlbench[mysql]"
 
     def connect(self, host, user, password, port=None, database=None):
         import mysql.connector
@@ -267,6 +284,8 @@ class PostgreSQLAdapter(DBAdapter):
     default_port = 5432
     requires_database = True
     supports_spool = False
+    required_module = "psycopg2"
+    install_hint = "pip install sqlbench[postgresql]"
 
     def connect(self, host, user, password, port=None, database=None):
         import psycopg2
@@ -378,6 +397,25 @@ def get_adapter(db_type):
     raise ValueError(f"Unknown database type: {db_type}")
 
 
-def get_adapter_choices():
-    """Get list of (db_type, display_name) for UI."""
-    return [(key, cls.display_name) for key, cls in ADAPTERS.items()]
+def get_adapter_choices(include_unavailable=False):
+    """Get list of (db_type, display_name) for UI.
+
+    Args:
+        include_unavailable: If True, include all adapters. If False, only include
+                           adapters whose required modules are installed.
+    """
+    if include_unavailable:
+        return [(key, cls.display_name) for key, cls in ADAPTERS.items()]
+    return [(key, cls.display_name) for key, cls in ADAPTERS.items() if cls.is_available()]
+
+
+def get_unavailable_adapters():
+    """Get list of adapters that are not available due to missing dependencies.
+
+    Returns list of (db_type, display_name, install_hint).
+    """
+    return [
+        (key, cls.display_name, cls.install_hint)
+        for key, cls in ADAPTERS.items()
+        if not cls.is_available()
+    ]
