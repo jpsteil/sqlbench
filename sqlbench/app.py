@@ -7,6 +7,7 @@ from tkinter import ttk
 
 from sqlbench.database import Database
 from sqlbench.adapters import get_adapter, ADAPTERS
+from sqlbench.version import __version__
 from sqlbench.tabs.sql_tab import SQLTab
 from sqlbench.tabs.spool_tab import SpoolTab
 from sqlbench.dialogs.connection_dialog import ConnectionDialog
@@ -18,7 +19,7 @@ class SQLBenchApp:
         # Set className for proper window manager integration (Linux/X11)
         # This makes the app show as "SQLBench" in window lists and match the .desktop file
         self.root = tk.Tk(className="sqlbench")
-        self.root.title("SQLBench")
+        self.root.title(f"SQLBench v{__version__}")
 
         # Set window icon
         self._set_window_icon()
