@@ -1,7 +1,9 @@
 """Connection management dialog."""
 
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
+from pathlib import Path
 import threading
 
 from sqlbench.adapters import get_adapter_choices, get_adapter, get_unavailable_adapters, ADAPTERS
@@ -204,7 +206,7 @@ class ConnectionDialog:
         for conn in self._connections:
             # Show type indicator
             db_type = conn.get("db_type", "ibmi")
-            type_indicator = {"ibmi": "[i]", "mysql": "[M]", "postgresql": "[P]"}.get(db_type, "[?]")
+            type_indicator = {"ibmi": "[i]", "ibmi_db": "[I]", "mysql": "[M]", "postgresql": "[P]"}.get(db_type, "[?]")
             # Mark unavailable connections
             if db_type not in available_types:
                 type_indicator = "[!]"
@@ -430,6 +432,97 @@ class ConnectionDialog:
             status_text.config(state=tk.DISABLED)
             dialog.update()
 
+        def install_clidriver(log_status):
+            """Download and install IBM Db2 clidriver for ibm_db."""
+            import platform
+            import tarfile
+            import urllib.request
+            from pathlib import Path
+
+            # Determine platform and download URL
+            system = platform.system().lower()
+            machine = platform.machine().lower()
+
+            if system == "linux" and machine in ("x86_64", "amd64"):
+                url = "https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz"
+            elif system == "linux" and machine in ("aarch64", "arm64"):
+                url = "https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxarm64_odbc_cli.tar.gz"
+            elif system == "darwin" and machine in ("x86_64", "amd64"):
+                url = "https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macos64_odbc_cli.tar.gz"
+            elif system == "darwin" and machine == "arm64":
+                # M1/M2 Mac - use x86_64 version with Rosetta or native if available
+                url = "https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macos64_odbc_cli.tar.gz"
+            elif system == "windows":
+                log_status("  Windows: Please download clidriver manually from IBM")
+                return False
+            else:
+                log_status(f"  Unsupported platform: {system}/{machine}")
+                return False
+
+            # Set up paths
+            home = Path.home()
+            driver_dir = home / "db2drivers"
+            clidriver_path = driver_dir / "clidriver"
+            tar_file = driver_dir / "odbc_cli.tar.gz"
+
+            # Check if already installed
+            if (clidriver_path / "lib").exists():
+                log_status("  clidriver already installed")
+                return True
+
+            try:
+                # Create directory
+                driver_dir.mkdir(parents=True, exist_ok=True)
+
+                # Download
+                log_status("  Downloading clidriver (~100MB)...")
+                urllib.request.urlretrieve(url, tar_file)
+
+                # Extract
+                log_status("  Extracting...")
+                with tarfile.open(tar_file, "r:gz") as tar:
+                    tar.extractall(path=driver_dir)
+
+                # Clean up tar file
+                tar_file.unlink()
+
+                # Set environment variable hint
+                log_status("  clidriver installed to ~/db2drivers/clidriver")
+
+                # Update environment for current process
+                import os
+                cli_path = str(clidriver_path)
+                os.environ["IBM_DB_HOME"] = cli_path
+                lib_path = os.environ.get("LD_LIBRARY_PATH", "")
+                os.environ["LD_LIBRARY_PATH"] = f"{cli_path}/lib:{lib_path}"
+
+                # Add to shell config
+                shell_config = home / ".bashrc"
+                if not shell_config.exists():
+                    shell_config = home / ".profile"
+
+                config_lines = [
+                    f'\n# IBM Db2 clidriver (added by SQLBench)',
+                    f'export IBM_DB_HOME=~/db2drivers/clidriver',
+                    f'export LD_LIBRARY_PATH=$IBM_DB_HOME/lib:$LD_LIBRARY_PATH',
+                ]
+
+                # Check if already in config
+                try:
+                    existing = shell_config.read_text() if shell_config.exists() else ""
+                    if "IBM_DB_HOME" not in existing:
+                        with open(shell_config, "a") as f:
+                            f.write("\n".join(config_lines) + "\n")
+                        log_status(f"  Added environment vars to {shell_config.name}")
+                except Exception:
+                    log_status("  Note: Add IBM_DB_HOME to your shell config manually")
+
+                return True
+
+            except Exception as e:
+                log_status(f"  clidriver install failed: {e}")
+                return False
+
         def do_install():
             install_btn.config(state=tk.DISABLED)
             selected = [db_type for db_type, var in check_vars.items() if var.get()]
@@ -440,13 +533,35 @@ class ConnectionDialog:
 
             python = sys.executable
             for db_type in selected:
-                extra = {"ibmi": "ibmi", "mysql": "mysql", "postgresql": "postgresql"}.get(db_type)
+                extra = {"ibmi": "ibmi", "ibmi_db": "ibmi-db", "mysql": "mysql", "postgresql": "postgresql"}.get(db_type)
                 if extra:
-                    log_status(f"Installing sqlbench[{extra}]...")
+                    # Special handling for ibm_db - need clidriver first
+                    if db_type == "ibmi_db":
+                        log_status("Installing IBM clidriver...")
+                        if not install_clidriver(log_status):
+                            log_status("  Skipping ibm_db (clidriver required)")
+                            continue
+
+                    # Map db_type to actual pip package
+                    packages = {
+                        "ibmi": "pyodbc",
+                        "ibmi_db": "ibm_db",
+                        "mysql": "mysql-connector-python",
+                        "postgresql": "psycopg2-binary",
+                    }
+                    package = packages.get(db_type, extra)
+                    log_status(f"Installing {package}...")
                     try:
+                        # Set up environment - inherit current env and add IBM_DB_HOME if needed
+                        env = os.environ.copy()
+                        if db_type == "ibmi_db":
+                            cli_path = Path.home() / "db2drivers" / "clidriver"
+                            if cli_path.exists():
+                                env["IBM_DB_HOME"] = str(cli_path)
+
                         result = subprocess.run(
-                            [python, "-m", "pip", "install", f"sqlbench[{extra}]"],
-                            capture_output=True, text=True, timeout=120
+                            [python, "-m", "pip", "install", package],
+                            capture_output=True, text=True, timeout=180, env=env
                         )
                         if result.returncode == 0:
                             log_status(f"  {extra}: OK")

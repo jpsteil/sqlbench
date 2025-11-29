@@ -36,11 +36,13 @@ dependencies = [
 mysql = ["mysql-connector-python>=8.0.0"]
 postgresql = ["psycopg2-binary>=2.9.0"]
 ibmi = ["pyodbc>=4.0.0"]
+ibmi-db = ["ibm_db>=3.0.0"]
 export = ["reportlab>=4.0.0", "openpyxl>=3.1.0"]
 all = [
     "mysql-connector-python>=8.0.0",
     "psycopg2-binary>=2.9.0",
     "pyodbc>=4.0.0",
+    "ibm_db>=3.0.0",
     "reportlab>=4.0.0",
     "openpyxl>=3.1.0",
 ]
