@@ -1116,6 +1116,7 @@ class SQLBenchApp:
         """Restart the application."""
         import sys
         import os
+        import subprocess
 
         # Save current state before restart
         self._save_geometry()
@@ -1132,8 +1133,15 @@ class SQLBenchApp:
         self.root.destroy()
 
         # Re-execute the application
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
+        # Use subprocess.Popen to start new process, then exit current
+        if sys.argv[0].endswith('sqlbench') or 'sqlbench' in sys.argv[0]:
+            # Running via entry point script (e.g., pipx)
+            subprocess.Popen([sys.argv[0]])
+        else:
+            # Running via python -m sqlbench
+            subprocess.Popen([sys.executable, '-m', 'sqlbench'])
+
+        sys.exit(0)
 
     def _show_settings(self):
         """Show settings dialog."""
