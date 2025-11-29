@@ -307,18 +307,18 @@ class ConnectionDialog:
         password = self.pass_entry.get()
 
         if not all([name, host, user]):
-            messagebox.showwarning("Missing Fields", "Name, Host, and User are required.")
+            messagebox.showwarning("Missing Fields", "Name, Host, and User are required.", parent=self.top)
             return
 
         # Validate required database for certain types
         adapter = get_adapter(db_type)
         if adapter.requires_database and not database:
-            messagebox.showwarning("Missing Fields", "Database name is required for this connection type.")
+            messagebox.showwarning("Missing Fields", "Database name is required for this connection type.", parent=self.top)
             return
 
         self.db.save_connection(name, db_type, host, port, database, user, password, conn_id=self._current_id)
         self._refresh_list()
-        messagebox.showinfo("Saved", f"Connection '{name}' saved.")
+        messagebox.showinfo("Saved", f"Connection '{name}' saved.", parent=self.top)
 
     def _delete(self):
         selection = self.conn_listbox.curselection()
@@ -328,7 +328,7 @@ class ConnectionDialog:
         idx = selection[0]
         if idx < len(self._connections):
             conn = self._connections[idx]
-            if messagebox.askyesno("Confirm Delete", f"Delete connection '{conn['name']}'?"):
+            if messagebox.askyesno("Confirm Delete", f"Delete connection '{conn['name']}'?", parent=self.top):
                 self.db.delete_connection(conn["id"])
                 self._refresh_list()
                 self._new()

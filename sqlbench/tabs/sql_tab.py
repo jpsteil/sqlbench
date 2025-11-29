@@ -325,6 +325,16 @@ class SQLTab:
         self._highlight_job = None  # For debounced highlighting
         self.sql_text.bind("<KeyRelease>", self._on_sql_key_release)
 
+        # Create context menu for SQL editor
+        self._create_sql_context_menu()
+
+        # SQL editor search state
+        self._sql_search_matches = []
+        self._sql_search_index = -1
+        self._sql_last_search = ""
+        self.sql_text.tag_configure("search_highlight", background="#FFFF00", foreground="#000000")
+        self.sql_text.tag_configure("search_current", background="#FF8C00", foreground="#000000")
+
         # Results area with tabs
         results_frame = ttk.Frame(self.paned)
         self.paned.add(results_frame, weight=2)
@@ -445,6 +455,26 @@ class SQLTab:
         self.save_menu.add_command(label="JSON (.json)", command=self._save_to_json)
         self.save_btn = ttk.Menubutton(nav_frame, text="Save To", menu=self.save_menu)
         self.save_btn.pack(side=tk.LEFT, padx=(15, 0))
+
+        # Results search frame
+        results_search_frame = ttk.Frame(nav_frame)
+        results_search_frame.pack(side=tk.LEFT, padx=(20, 0))
+
+        ttk.Label(results_search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 2))
+        self.results_search_var = tk.StringVar()
+        self.results_search_entry = ttk.Entry(results_search_frame, textvariable=self.results_search_var, width=15)
+        self.results_search_entry.pack(side=tk.LEFT, padx=2)
+        self.results_search_entry.bind("<Return>", lambda e: self._results_search_next())
+        self.results_search_entry.bind("<Shift-Return>", lambda e: self._results_search_prev())
+
+        self.results_search_prev_btn = ttk.Button(results_search_frame, text="<", width=2, command=self._results_search_prev)
+        self.results_search_prev_btn.pack(side=tk.LEFT, padx=1)
+        self.results_search_next_btn = ttk.Button(results_search_frame, text=">", width=2, command=self._results_search_next)
+        self.results_search_next_btn.pack(side=tk.LEFT, padx=1)
+
+        self._results_search_matches = []
+        self._results_search_index = -1
+        self._results_last_search = ""
 
         # Right side - rows per page and show all
         settings_frame = ttk.Frame(self.paging_frame)
@@ -1652,6 +1682,304 @@ class SQLTab:
             item = all_items[row_in_page]
             self.results_tree.selection_set(item)
             self.results_tree.see(item)
+
+    # ===== SQL Editor Context Menu and Search =====
+
+    def _create_sql_context_menu(self):
+        """Create right-click context menu for SQL editor."""
+        self.sql_context_menu = tk.Menu(self.sql_text, tearoff=0)
+        self.sql_context_menu.add_command(label="Select All", command=self._select_all, accelerator="Ctrl+A")
+        self.sql_context_menu.add_separator()
+        self.sql_context_menu.add_command(label="Cut", command=self._sql_cut, accelerator="Ctrl+X")
+        self.sql_context_menu.add_command(label="Copy", command=self._sql_copy, accelerator="Ctrl+C")
+        self.sql_context_menu.add_command(label="Paste", command=self._sql_paste, accelerator="Ctrl+V")
+        self.sql_context_menu.add_separator()
+        self.sql_context_menu.add_command(label="Find...", command=self._show_sql_search_dialog, accelerator="Ctrl+F")
+
+        self.sql_text.bind("<Button-3>", self._show_sql_context_menu)
+        self.sql_text.bind("<Control-f>", lambda e: self._show_sql_search_dialog())
+        self.sql_text.bind("<Control-F>", lambda e: self._show_sql_search_dialog())
+
+    def _show_sql_context_menu(self, event):
+        """Show context menu at mouse position."""
+        try:
+            self.sql_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.sql_context_menu.grab_release()
+
+    def _sql_cut(self):
+        """Cut selected text to clipboard."""
+        try:
+            selected = self.sql_text.get("sel.first", "sel.last")
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(selected)
+            self.sql_text.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass  # No selection
+
+    def _sql_copy(self):
+        """Copy selected text to clipboard."""
+        try:
+            selected = self.sql_text.get("sel.first", "sel.last")
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(selected)
+        except tk.TclError:
+            pass  # No selection
+
+    def _sql_paste(self):
+        """Paste text from clipboard."""
+        try:
+            # Delete selection if any
+            try:
+                self.sql_text.delete("sel.first", "sel.last")
+            except tk.TclError:
+                pass
+            # Get clipboard content and insert
+            text = self.app.root.clipboard_get()
+            self.sql_text.insert("insert", text)
+        except tk.TclError:
+            pass  # Nothing in clipboard
+
+    def _show_sql_search_dialog(self):
+        """Show search dialog for SQL editor."""
+        # Create a simple search bar at the top of the SQL frame
+        if hasattr(self, '_sql_search_frame') and self._sql_search_frame.winfo_exists():
+            # Already visible, focus the entry
+            self._sql_search_entry.focus_set()
+            self._sql_search_entry.select_range(0, tk.END)
+            return
+
+        # Get the SQL frame (parent of sql_text)
+        sql_frame = self.sql_text.master
+
+        # Create search frame
+        self._sql_search_frame = ttk.Frame(sql_frame)
+        self._sql_search_frame.pack(side=tk.TOP, fill=tk.X, before=self.sql_text)
+
+        ttk.Label(self._sql_search_frame, text="Find:").pack(side=tk.LEFT, padx=(5, 2))
+
+        self._sql_search_var = tk.StringVar()
+        self._sql_search_entry = ttk.Entry(self._sql_search_frame, textvariable=self._sql_search_var, width=25)
+        self._sql_search_entry.pack(side=tk.LEFT, padx=2)
+        self._sql_search_entry.bind("<Return>", lambda e: self._sql_search_next())
+        self._sql_search_entry.bind("<Shift-Return>", lambda e: self._sql_search_prev())
+        self._sql_search_entry.bind("<Escape>", lambda e: self._close_sql_search())
+
+        ttk.Button(self._sql_search_frame, text="<", width=2, command=self._sql_search_prev).pack(side=tk.LEFT, padx=1)
+        ttk.Button(self._sql_search_frame, text=">", width=2, command=self._sql_search_next).pack(side=tk.LEFT, padx=1)
+
+        self._sql_search_label = ttk.Label(self._sql_search_frame, text="")
+        self._sql_search_label.pack(side=tk.LEFT, padx=10)
+
+        ttk.Button(self._sql_search_frame, text="X", width=2, command=self._close_sql_search).pack(side=tk.RIGHT, padx=2)
+
+        self._sql_search_entry.focus_set()
+
+    def _close_sql_search(self):
+        """Close the SQL search bar."""
+        if hasattr(self, '_sql_search_frame') and self._sql_search_frame.winfo_exists():
+            self._sql_search_frame.destroy()
+            # Clear highlights
+            self.sql_text.tag_remove("search_highlight", "1.0", tk.END)
+            self.sql_text.tag_remove("search_current", "1.0", tk.END)
+            self._sql_search_matches = []
+            self._sql_search_index = -1
+            self.sql_text.focus_set()
+
+    def _sql_search_next(self):
+        """Find next occurrence in SQL editor."""
+        if not hasattr(self, '_sql_search_var'):
+            return
+        search_term = self._sql_search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._sql_search_matches or self._sql_last_search != search_term:
+            self._sql_find_all_matches(search_term)
+            self._sql_last_search = search_term
+
+        if not self._sql_search_matches:
+            self._sql_search_label.config(text="Not found")
+            return
+
+        # Move to next match
+        self._sql_search_index = (self._sql_search_index + 1) % len(self._sql_search_matches)
+        self._sql_highlight_current_match()
+
+    def _sql_search_prev(self):
+        """Find previous occurrence in SQL editor."""
+        if not hasattr(self, '_sql_search_var'):
+            return
+        search_term = self._sql_search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._sql_search_matches or self._sql_last_search != search_term:
+            self._sql_find_all_matches(search_term)
+            self._sql_last_search = search_term
+
+        if not self._sql_search_matches:
+            self._sql_search_label.config(text="Not found")
+            return
+
+        # Move to previous match
+        self._sql_search_index = (self._sql_search_index - 1) % len(self._sql_search_matches)
+        self._sql_highlight_current_match()
+
+    def _sql_find_all_matches(self, search_term):
+        """Find all matches in SQL editor."""
+        self._sql_search_matches = []
+        self._sql_search_index = -1
+
+        # Remove existing highlights
+        self.sql_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.sql_text.tag_remove("search_current", "1.0", tk.END)
+
+        if not search_term:
+            return
+
+        # Search through text (case insensitive)
+        start_pos = "1.0"
+        while True:
+            pos = self.sql_text.search(search_term, start_pos, stopindex=tk.END, nocase=True)
+            if not pos:
+                break
+
+            end_pos = f"{pos}+{len(search_term)}c"
+            self._sql_search_matches.append((pos, end_pos))
+            self.sql_text.tag_add("search_highlight", pos, end_pos)
+            start_pos = end_pos
+
+    def _sql_highlight_current_match(self):
+        """Highlight the current match in SQL editor."""
+        if not self._sql_search_matches or self._sql_search_index < 0:
+            return
+
+        # Remove previous current highlight
+        self.sql_text.tag_remove("search_current", "1.0", tk.END)
+
+        # Apply current highlight
+        pos, end_pos = self._sql_search_matches[self._sql_search_index]
+        self.sql_text.tag_add("search_current", pos, end_pos)
+
+        # Scroll to match
+        self.sql_text.see(pos)
+        self.sql_text.mark_set("insert", pos)
+
+        # Update label
+        if hasattr(self, '_sql_search_label'):
+            self._sql_search_label.config(
+                text=f"{self._sql_search_index + 1} of {len(self._sql_search_matches)}"
+            )
+
+    # ===== Results Search =====
+
+    def _results_search_next(self):
+        """Find next occurrence in results."""
+        search_term = self.results_search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._results_search_matches or self._results_last_search != search_term:
+            self._results_find_all_matches(search_term)
+            self._results_last_search = search_term
+
+        if not self._results_search_matches:
+            self.app.statusbar.config(text=f"'{search_term}' not found in results")
+            return
+
+        # Move to next match
+        self._results_search_index = (self._results_search_index + 1) % len(self._results_search_matches)
+        self._results_highlight_current_match()
+
+    def _results_search_prev(self):
+        """Find previous occurrence in results."""
+        search_term = self.results_search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._results_search_matches or self._results_last_search != search_term:
+            self._results_find_all_matches(search_term)
+            self._results_last_search = search_term
+
+        if not self._results_search_matches:
+            self.app.statusbar.config(text=f"'{search_term}' not found in results")
+            return
+
+        # Move to previous match
+        self._results_search_index = (self._results_search_index - 1) % len(self._results_search_matches)
+        self._results_highlight_current_match()
+
+    def _results_find_all_matches(self, search_term):
+        """Find all matches in results treeview."""
+        self._results_search_matches = []
+        self._results_search_index = -1
+
+        if not search_term or not self._all_rows:
+            return
+
+        search_lower = search_term.lower()
+
+        # Search through all visible items in treeview
+        for item_id in self.results_tree.get_children():
+            values = self.results_tree.item(item_id, 'values')
+            for col_idx, value in enumerate(values):
+                if search_lower in str(value).lower():
+                    self._results_search_matches.append((item_id, col_idx))
+
+    def _results_highlight_current_match(self):
+        """Highlight the current match in results."""
+        if not self._results_search_matches or self._results_search_index < 0:
+            return
+
+        item_id, col_idx = self._results_search_matches[self._results_search_index]
+
+        # Select and scroll to the item
+        self.results_tree.selection_set(item_id)
+        self.results_tree.see(item_id)
+        self.results_tree.focus(item_id)
+
+        # Update status
+        self.app.statusbar.config(
+            text=f"Match {self._results_search_index + 1} of {len(self._results_search_matches)} "
+                 f"(column: {self._columns[col_idx] if col_idx < len(self._columns) else '?'})"
+        )
+
+    def apply_theme(self):
+        """Apply current theme to SQL tab components."""
+        is_dark = self.app.dark_mode_var.get()
+
+        if is_dark:
+            menu_bg = "#2b2b2b"
+            menu_fg = "#a9b7c6"
+            select_bg = "#214283"
+            search_highlight = "#614900"
+            search_current = "#8B4000"
+            highlight_fg = "#ffffff"
+        else:
+            menu_bg = "#f0f0f0"
+            menu_fg = "#000000"
+            select_bg = "#0078d4"
+            search_highlight = "#FFFF00"
+            search_current = "#FF8C00"
+            highlight_fg = "#000000"
+
+        # Update context menu
+        if hasattr(self, 'sql_context_menu'):
+            self.sql_context_menu.configure(bg=menu_bg, fg=menu_fg,
+                                           activebackground=select_bg, activeforeground=menu_fg)
+
+        # Update search highlight tags
+        self.sql_text.tag_configure("search_highlight", background=search_highlight, foreground=highlight_fg)
+        self.sql_text.tag_configure("search_current", background=search_current, foreground=highlight_fg)
+
+        # Update syntax highlighting for theme
+        self._setup_syntax_highlighting()
+        self._highlight_sql()
 
 
 class RecordViewerDialog:

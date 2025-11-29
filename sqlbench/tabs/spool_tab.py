@@ -84,6 +84,26 @@ class SpoolTab:
         self.print_btn = ttk.Button(viewer_btn_frame, text="Print", command=self._print_spool, state=tk.DISABLED)
         self.print_btn.pack(side=tk.LEFT, padx=2)
 
+        # Search frame on the right
+        search_frame = ttk.Frame(viewer_btn_frame)
+        search_frame.pack(side=tk.RIGHT, padx=5)
+
+        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 2))
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=20)
+        self.search_entry.pack(side=tk.LEFT, padx=2)
+        self.search_entry.bind("<Return>", lambda e: self._search_next())
+        self.search_entry.bind("<Shift-Return>", lambda e: self._search_prev())
+
+        self.search_prev_btn = ttk.Button(search_frame, text="<", width=2, command=self._search_prev)
+        self.search_prev_btn.pack(side=tk.LEFT, padx=1)
+        self.search_next_btn = ttk.Button(search_frame, text=">", width=2, command=self._search_next)
+        self.search_next_btn.pack(side=tk.LEFT, padx=1)
+
+        self._search_matches = []
+        self._search_index = -1
+        self._last_search = ""
+
         self.viewer_text = tk.Text(viewer_frame, wrap=tk.NONE, font=("Courier", 10))
         viewer_scroll_y = ttk.Scrollbar(viewer_frame, orient=tk.VERTICAL, command=self.viewer_text.yview)
         viewer_scroll_x = ttk.Scrollbar(viewer_frame, orient=tk.HORIZONTAL, command=self.viewer_text.xview)
@@ -92,6 +112,13 @@ class SpoolTab:
         viewer_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         viewer_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         self.viewer_text.pack(fill=tk.BOTH, expand=True)
+
+        # Configure search highlight tag
+        self.viewer_text.tag_configure("search_highlight", background="#FFFF00", foreground="#000000")
+        self.viewer_text.tag_configure("search_current", background="#FF8C00", foreground="#000000")
+
+        # Create context menu for viewer text
+        self._create_viewer_context_menu()
 
     def _set_running(self, running):
         """Update UI state for running/not running."""
@@ -561,6 +588,163 @@ class SpoolTab:
             messagebox.showerror("Error", f"Print failed: {e}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not print: {e}")
+
+    def _create_viewer_context_menu(self):
+        """Create right-click context menu for viewer text."""
+        self.viewer_context_menu = tk.Menu(self.viewer_text, tearoff=0)
+        self.viewer_context_menu.add_command(label="Select All", command=self._select_all, accelerator="Ctrl+A")
+        self.viewer_context_menu.add_separator()
+        self.viewer_context_menu.add_command(label="Cut", command=self._cut, accelerator="Ctrl+X")
+        self.viewer_context_menu.add_command(label="Copy", command=self._copy, accelerator="Ctrl+C")
+
+        self.viewer_text.bind("<Button-3>", self._show_context_menu)
+        self.viewer_text.bind("<Control-a>", lambda e: self._select_all())
+        self.viewer_text.bind("<Control-A>", lambda e: self._select_all())
+
+    def _show_context_menu(self, event):
+        """Show context menu at mouse position."""
+        try:
+            self.viewer_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.viewer_context_menu.grab_release()
+
+    def _select_all(self):
+        """Select all text in viewer."""
+        self.viewer_text.tag_add("sel", "1.0", "end-1c")
+        self.viewer_text.mark_set("insert", "end-1c")
+        return "break"
+
+    def _cut(self):
+        """Cut selected text to clipboard."""
+        try:
+            selected = self.viewer_text.get("sel.first", "sel.last")
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(selected)
+            self.viewer_text.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass  # No selection
+
+    def _copy(self):
+        """Copy selected text to clipboard."""
+        try:
+            selected = self.viewer_text.get("sel.first", "sel.last")
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append(selected)
+        except tk.TclError:
+            pass  # No selection
+
+    def _search_next(self):
+        """Find next occurrence of search term."""
+        search_term = self.search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._search_matches or self._last_search != search_term:
+            self._find_all_matches(search_term)
+            self._last_search = search_term
+
+        if not self._search_matches:
+            self.app.statusbar.config(text=f"'{search_term}' not found")
+            return
+
+        # Move to next match
+        self._search_index = (self._search_index + 1) % len(self._search_matches)
+        self._highlight_current_match()
+
+    def _search_prev(self):
+        """Find previous occurrence of search term."""
+        search_term = self.search_var.get()
+        if not search_term:
+            return
+
+        # If search term changed, find all matches
+        if not self._search_matches or self._last_search != search_term:
+            self._find_all_matches(search_term)
+            self._last_search = search_term
+
+        if not self._search_matches:
+            self.app.statusbar.config(text=f"'{search_term}' not found")
+            return
+
+        # Move to previous match
+        self._search_index = (self._search_index - 1) % len(self._search_matches)
+        self._highlight_current_match()
+
+    def _find_all_matches(self, search_term):
+        """Find all matches in the text."""
+        self._search_matches = []
+        self._search_index = -1
+
+        # Remove existing highlights
+        self.viewer_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.viewer_text.tag_remove("search_current", "1.0", tk.END)
+
+        if not search_term:
+            return
+
+        # Search through text (case insensitive)
+        start_pos = "1.0"
+        search_term_lower = search_term.lower()
+
+        while True:
+            pos = self.viewer_text.search(search_term, start_pos, stopindex=tk.END, nocase=True)
+            if not pos:
+                break
+
+            end_pos = f"{pos}+{len(search_term)}c"
+            self._search_matches.append((pos, end_pos))
+            self.viewer_text.tag_add("search_highlight", pos, end_pos)
+            start_pos = end_pos
+
+    def _highlight_current_match(self):
+        """Highlight the current match and scroll to it."""
+        if not self._search_matches or self._search_index < 0:
+            return
+
+        # Remove previous current highlight
+        self.viewer_text.tag_remove("search_current", "1.0", tk.END)
+
+        # Apply current highlight
+        pos, end_pos = self._search_matches[self._search_index]
+        self.viewer_text.tag_add("search_current", pos, end_pos)
+
+        # Scroll to match
+        self.viewer_text.see(pos)
+        self.viewer_text.mark_set("insert", pos)
+
+        # Update status
+        self.app.statusbar.config(
+            text=f"Match {self._search_index + 1} of {len(self._search_matches)}"
+        )
+
+    def apply_theme(self):
+        """Apply current theme to viewer components."""
+        is_dark = self.app.dark_mode_var.get()
+
+        if is_dark:
+            text_bg = "#313335"
+            text_fg = "#a9b7c6"
+            select_bg = "#214283"
+            menu_bg = "#2b2b2b"
+            search_highlight = "#614900"
+            search_current = "#8B4000"
+        else:
+            text_bg = "#ffffff"
+            text_fg = "#000000"
+            select_bg = "#0078d4"
+            menu_bg = "#f0f0f0"
+            search_highlight = "#FFFF00"
+            search_current = "#FF8C00"
+
+        self.viewer_text.configure(bg=text_bg, fg=text_fg, insertbackground=text_fg,
+                                  selectbackground=select_bg, selectforeground=text_fg)
+        self.viewer_text.tag_configure("search_highlight", background=search_highlight,
+                                       foreground="#ffffff" if is_dark else "#000000")
+        self.viewer_text.tag_configure("search_current", background=search_current,
+                                       foreground="#ffffff" if is_dark else "#000000")
+        self.viewer_context_menu.configure(bg=menu_bg, fg=text_fg,
+                                          activebackground=select_bg, activeforeground=text_fg)
 
     def get_user(self):
         """Get current user filter."""

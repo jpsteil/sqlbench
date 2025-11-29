@@ -1218,11 +1218,16 @@ class SQLBenchApp:
             style.configure("TScrollbar", background=bg_light, troughcolor=bg_dark)
             style.configure("Treeview", background=bg_light, foreground=fg, fieldbackground=bg_light)
             style.configure("Treeview.Heading", background=bg, foreground=fg)
+            style.configure("TCheckbutton", background=bg, foreground=fg)
+            style.configure("TSpinbox", fieldbackground=bg_light, foreground=fg)
+            style.configure("TMenubutton", background=bg_light, foreground=fg)
 
             style.map("TButton", background=[("active", bg_light)])
             style.map("TNotebook.Tab", background=[("selected", bg), ("active", bg_light)])
             style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", fg)])
             style.map("TCombobox", fieldbackground=[("readonly", bg_light)])
+            style.map("TCheckbutton", background=[("active", bg)])
+            style.map("TMenubutton", background=[("active", bg_light)])
 
             self.root.configure(bg=bg)
         else:
@@ -1252,16 +1257,23 @@ class SQLBenchApp:
             style.configure("Treeview", background=bg_light, foreground=fg, fieldbackground=bg_light)
             style.configure("Treeview.Heading", background=bg, foreground=fg)
             style.configure("TCheckbutton", background=bg, foreground=fg)
+            style.configure("TSpinbox", fieldbackground=bg_light, foreground=fg)
+            style.configure("TMenubutton", background="#e1e1e1", foreground=fg)
 
             style.map("TButton", background=[("active", "#ececec")])
             style.map("TNotebook.Tab", background=[("selected", bg)])
             style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", "#ffffff")])
             style.map("TCombobox", fieldbackground=[("readonly", bg_light)])
+            style.map("TCheckbutton", background=[("active", bg)])
+            style.map("TMenubutton", background=[("active", "#ececec")])
 
             self.root.configure(bg=bg)
 
         # Apply to non-ttk widgets
         self._apply_theme_to_widgets()
+
+        # Apply to tab-specific components
+        self._apply_theme_to_tabs()
 
     def _apply_theme_to_widgets(self):
         """Apply theme to non-ttk widgets (Text, Listbox, Menu)."""
@@ -1299,6 +1311,20 @@ class SQLBenchApp:
 
         for child in widget.winfo_children():
             self._configure_widgets_recursive(child, bg, fg, select_bg, menu_bg)
+
+    def _apply_theme_to_tabs(self):
+        """Apply theme to tab-specific components (search highlights, etc.)."""
+        for tab_id in self.notebook.tabs():
+            try:
+                tab_frame = self.notebook.nametowidget(tab_id)
+                # Call apply_theme on SQL tabs (for syntax highlighting and search)
+                if hasattr(tab_frame, 'sql_tab') and hasattr(tab_frame.sql_tab, 'apply_theme'):
+                    tab_frame.sql_tab.apply_theme()
+                # Call apply_theme on Spool tabs (for search highlights)
+                if hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'apply_theme'):
+                    tab_frame.spool_tab.apply_theme()
+            except Exception:
+                pass
 
     def _restore_session(self):
         """Restore connections and tabs from last session (non-blocking)."""
