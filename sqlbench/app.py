@@ -775,7 +775,13 @@ class SQLBenchApp:
         else:
             tab_title = f"{name} SQL"
 
-        self.notebook.add(tab_frame, text=tab_title)
+        # Get icon for database type
+        db_type = conn_data.get("db_type", "ibmi")
+        icon = self._db_icons.get(db_type)
+        if icon:
+            self.notebook.add(tab_frame, text=tab_title, image=icon, compound=tk.LEFT)
+        else:
+            self.notebook.add(tab_frame, text=tab_title)
         self.notebook.select(tab_frame)
 
         # Store reference for cleanup
@@ -815,7 +821,13 @@ class SQLBenchApp:
         else:
             tab_title = f"{name} SPLF"
 
-        self.notebook.add(tab_frame, text=tab_title)
+        # Get icon for database type (spool is IBM i only, but get from conn_data for consistency)
+        db_type = conn_data.get("db_type", "ibmi")
+        icon = self._db_icons.get(db_type)
+        if icon:
+            self.notebook.add(tab_frame, text=tab_title, image=icon, compound=tk.LEFT)
+        else:
+            self.notebook.add(tab_frame, text=tab_title)
         self.notebook.select(tab_frame)
 
         tab_frame.spool_tab = spool_tab
