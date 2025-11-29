@@ -501,19 +501,24 @@ class ConnectionDialog:
                     except Exception as e:
                         log_status(f"  {extra}: ERROR - {e}")
 
-            log_status("\nDone! Please restart SQLBench to use new drivers.")
+            log_status("\nDone!")
             install_btn.config(state=tk.NORMAL)
-            dialog.after(0, lambda: restart_btn.pack(side=tk.LEFT, padx=5))
+            # Ask user if they want to restart
+            dialog.after(0, ask_restart)
 
-        def do_restart():
-            dialog.destroy()
-            if self.app:
-                self.app._restart_app()
+        def ask_restart():
+            result = messagebox.askyesno(
+                "Installation Complete",
+                "Drivers installed successfully.\n\nWould you like to restart now?",
+                parent=dialog
+            )
+            if result:
+                dialog.destroy()
+                if self.app:
+                    self.app._restart_app()
 
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(pady=10)
         install_btn = ttk.Button(btn_frame, text="Install Selected", command=lambda: threading.Thread(target=do_install, daemon=True).start())
         install_btn.pack(side=tk.LEFT, padx=5)
-        restart_btn = ttk.Button(btn_frame, text="Restart Now", command=do_restart)
-        # restart_btn is packed after installation completes
         ttk.Button(btn_frame, text="Close", command=dialog.destroy).pack(side=tk.LEFT, padx=5)

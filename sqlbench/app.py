@@ -1103,32 +1103,14 @@ class SQLBenchApp:
         from sqlbench.version import __version__
         tk.messagebox.showinfo("About", f"SQLBench v{__version__}\nMulti-database SQL Workbench")
 
-    def _show_restart_dialog(self, message="SQLBench has been upgraded.\n\nPlease restart the application to use the new version."):
-        """Show a dialog with restart option."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Restart Required")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        # Message
-        msg_frame = ttk.Frame(dialog, padding=20)
-        msg_frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(msg_frame, text=message, wraplength=300).pack()
-
-        # Buttons
-        btn_frame = ttk.Frame(dialog, padding=(20, 0, 20, 20))
-        btn_frame.pack(fill=tk.X)
-        ttk.Button(btn_frame, text="Restart Now", command=lambda: self._restart_app()).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Later", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-
-        # Center on parent
-        dialog.update_idletasks()
-        w = dialog.winfo_width()
-        h = dialog.winfo_height()
-        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
-        dialog.geometry(f"+{x}+{y}")
+    def _show_restart_dialog(self, message="SQLBench has been upgraded.\n\nWould you like to restart now?"):
+        """Show a dialog asking if user wants to restart."""
+        result = tk.messagebox.askyesno(
+            "Upgrade Complete",
+            message
+        )
+        if result:
+            self._restart_app()
 
     def _restart_app(self):
         """Restart the application."""
