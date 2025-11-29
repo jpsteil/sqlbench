@@ -311,7 +311,7 @@ class SQLTab:
         self.paned.add(sql_frame, weight=1)
 
         font_spec = ("TkFixedFont", self.app.font_size)
-        self.sql_text = tk.Text(sql_frame, height=10, wrap=tk.NONE, font=font_spec)
+        self.sql_text = tk.Text(sql_frame, height=10, wrap=tk.NONE, font=font_spec, undo=True, maxundo=-1)
         sql_scroll_y = ttk.Scrollbar(sql_frame, orient=tk.VERTICAL, command=self.sql_text.yview)
         sql_scroll_x = ttk.Scrollbar(sql_frame, orient=tk.HORIZONTAL, command=self.sql_text.xview)
         self.sql_text.configure(yscrollcommand=sql_scroll_y.set, xscrollcommand=sql_scroll_x.set)
@@ -456,22 +456,6 @@ class SQLTab:
         self.save_btn = ttk.Menubutton(nav_frame, text="Save To", menu=self.save_menu)
         self.save_btn.pack(side=tk.LEFT, padx=(15, 0))
 
-        # Results search frame
-        results_search_frame = ttk.Frame(nav_frame)
-        results_search_frame.pack(side=tk.LEFT, padx=(20, 0))
-
-        ttk.Label(results_search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 2))
-        self.results_search_var = tk.StringVar()
-        self.results_search_entry = ttk.Entry(results_search_frame, textvariable=self.results_search_var, width=15)
-        self.results_search_entry.pack(side=tk.LEFT, padx=2)
-        self.results_search_entry.bind("<Return>", lambda e: self._results_search_next())
-        self.results_search_entry.bind("<Shift-Return>", lambda e: self._results_search_prev())
-
-        self.results_search_prev_btn = ttk.Button(results_search_frame, text="<", width=2, command=self._results_search_prev)
-        self.results_search_prev_btn.pack(side=tk.LEFT, padx=1)
-        self.results_search_next_btn = ttk.Button(results_search_frame, text=">", width=2, command=self._results_search_next)
-        self.results_search_next_btn.pack(side=tk.LEFT, padx=1)
-
         self._results_search_matches = []
         self._results_search_index = -1
         self._results_last_search = ""
@@ -490,17 +474,34 @@ class SQLTab:
         self.show_all_cb.pack(side=tk.RIGHT, padx=10)
 
         # Rows per page
-        ttk.Label(settings_frame, text="Rows per page:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(settings_frame, text="Rows per page:").pack(side=tk.RIGHT, padx=(0, 5))
         self.rows_per_page_var = tk.StringVar(value="1000")
         self.rows_per_page_spin = ttk.Spinbox(
             settings_frame, from_=100, to=10000, increment=100,
             width=7, textvariable=self.rows_per_page_var
         )
-        self.rows_per_page_spin.pack(side=tk.LEFT)
+        self.rows_per_page_spin.pack(side=tk.RIGHT)
         self.rows_per_page_spin.bind("<Return>", self._on_rows_per_page_changed)
         self.rows_per_page_spin.bind("<FocusOut>", self._on_rows_per_page_changed)
         self.rows_per_page_spin.bind("<<Increment>>", self._on_rows_per_page_changed)
         self.rows_per_page_spin.bind("<<Decrement>>", self._on_rows_per_page_changed)
+
+        # Results search frame (before rows per page)
+        results_search_frame = ttk.Frame(settings_frame)
+        results_search_frame.pack(side=tk.RIGHT, padx=(0, 20))
+
+        self.results_search_next_btn = ttk.Button(results_search_frame, text=">", width=2, command=self._results_search_next)
+        self.results_search_next_btn.pack(side=tk.RIGHT, padx=1)
+        self.results_search_prev_btn = ttk.Button(results_search_frame, text="<", width=2, command=self._results_search_prev)
+        self.results_search_prev_btn.pack(side=tk.RIGHT, padx=1)
+
+        self.results_search_var = tk.StringVar()
+        self.results_search_entry = ttk.Entry(results_search_frame, textvariable=self.results_search_var, width=15)
+        self.results_search_entry.pack(side=tk.RIGHT, padx=2)
+        self.results_search_entry.bind("<Return>", lambda e: self._results_search_next())
+        self.results_search_entry.bind("<Shift-Return>", lambda e: self._results_search_prev())
+
+        ttk.Label(results_search_frame, text="Search:").pack(side=tk.RIGHT, padx=(0, 2))
 
     def _on_show_all_changed(self):
         """Handle show all checkbox change - re-run query with new limit."""
@@ -1688,24 +1689,67 @@ class SQLTab:
     def _create_sql_context_menu(self):
         """Create right-click context menu for SQL editor."""
         self.sql_context_menu = tk.Menu(self.sql_text, tearoff=0)
-        self.sql_context_menu.add_command(label="Select All", command=self._select_all, accelerator="Ctrl+A")
+        self.sql_context_menu.add_command(label="Undo", command=self._sql_undo, accelerator="Ctrl+Z")
+        self.sql_context_menu.add_command(label="Redo", command=self._sql_redo, accelerator="Ctrl+Shift+Z")
         self.sql_context_menu.add_separator()
         self.sql_context_menu.add_command(label="Cut", command=self._sql_cut, accelerator="Ctrl+X")
         self.sql_context_menu.add_command(label="Copy", command=self._sql_copy, accelerator="Ctrl+C")
         self.sql_context_menu.add_command(label="Paste", command=self._sql_paste, accelerator="Ctrl+V")
+        self.sql_context_menu.add_separator()
+        self.sql_context_menu.add_command(label="Select All", command=self._select_all, accelerator="Ctrl+A")
         self.sql_context_menu.add_separator()
         self.sql_context_menu.add_command(label="Find...", command=self._show_sql_search_dialog, accelerator="Ctrl+F")
 
         self.sql_text.bind("<Button-3>", self._show_sql_context_menu)
         self.sql_text.bind("<Control-f>", lambda e: self._show_sql_search_dialog())
         self.sql_text.bind("<Control-F>", lambda e: self._show_sql_search_dialog())
+        self.sql_text.bind("<Control-z>", lambda e: self._sql_undo())
+        self.sql_text.bind("<Control-Z>", lambda e: self._sql_redo())  # Ctrl+Shift+Z
 
     def _show_sql_context_menu(self, event):
         """Show context menu at mouse position."""
+        # Enable/disable undo based on edit history
         try:
-            self.sql_context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.sql_context_menu.grab_release()
+            self.sql_text.edit_undo()
+            self.sql_text.edit_redo()  # Undo our test undo
+            self.sql_context_menu.entryconfig("Undo", state=tk.NORMAL)
+        except tk.TclError:
+            self.sql_context_menu.entryconfig("Undo", state=tk.DISABLED)
+
+        # Enable/disable redo based on edit history
+        try:
+            self.sql_text.edit_redo()
+            self.sql_text.edit_undo()  # Undo our test redo
+            self.sql_context_menu.entryconfig("Redo", state=tk.NORMAL)
+        except tk.TclError:
+            self.sql_context_menu.entryconfig("Redo", state=tk.DISABLED)
+
+        # Enable/disable paste based on clipboard content
+        try:
+            self.app.root.clipboard_get()
+            self.sql_context_menu.entryconfig("Paste", state=tk.NORMAL)
+        except tk.TclError:
+            self.sql_context_menu.entryconfig("Paste", state=tk.DISABLED)
+
+        self.sql_context_menu.tk_popup(event.x_root, event.y_root, 0)
+
+    def _sql_undo(self):
+        """Undo last edit."""
+        try:
+            self.sql_text.edit_undo()
+            self._highlight_sql()
+        except tk.TclError:
+            pass  # Nothing to undo
+        return "break"
+
+    def _sql_redo(self):
+        """Redo last undone edit."""
+        try:
+            self.sql_text.edit_redo()
+            self._highlight_sql()
+        except tk.TclError:
+            pass  # Nothing to redo
+        return "break"
 
     def _sql_cut(self):
         """Cut selected text to clipboard."""

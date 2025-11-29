@@ -70,6 +70,12 @@ class SpoolTab:
         self.spool_tree.pack(fill=tk.BOTH, expand=True)
 
         self.spool_tree.bind("<Double-1>", lambda e: self._view_spool_file())
+        self.spool_tree.bind("<Button-3>", self._show_spool_context_menu)
+
+        # Context menu for spool list
+        self.spool_context_menu = tk.Menu(self.spool_tree, tearoff=0)
+        self.spool_context_menu.add_command(label="View", command=self._view_spool_file)
+        self.spool_context_menu.add_command(label="Delete", command=self._delete_spool_files)
 
         # Viewer area
         viewer_frame = ttk.LabelFrame(self.paned, text="Viewer")
@@ -186,6 +192,16 @@ class SpoolTab:
         """Handle spool file errors."""
         messagebox.showerror("Error", error)
 
+    def _show_spool_context_menu(self, event):
+        """Show context menu for spool file list."""
+        # Select the item under cursor
+        item = self.spool_tree.identify_row(event.y)
+        if item:
+            # Add to selection if not already selected
+            if item not in self.spool_tree.selection():
+                self.spool_tree.selection_set(item)
+            self.spool_context_menu.tk_popup(event.x_root, event.y_root, 0)
+
     def _view_spool_file(self):
         selection = self.spool_tree.selection()
         if not selection:
@@ -201,6 +217,13 @@ class SpoolTab:
         # Parse job name from qualified job (format: number/user/name)
         job_parts = qualified_job.split("/")
         job_name = job_parts[2] if len(job_parts) == 3 else qualified_job
+
+        # Show loading feedback
+        self.app.statusbar.config(text=f"Loading spool file {file_name}...")
+        self.viewer_text.delete("1.0", tk.END)
+        self.viewer_text.insert("1.0", "Loading...")
+        self.app.root.config(cursor="watch")
+        self.app.root.update()
 
         try:
             cursor = self.connection.cursor()
@@ -226,6 +249,7 @@ class SpoolTab:
             self._current_spool_info = {
                 "file_name": file_name,
                 "job_name": job_name,
+                "qualified_job": qualified_job,
                 "file_number": file_number,
                 "page_length": page_length,
                 "page_width": page_width
@@ -258,9 +282,13 @@ class SpoolTab:
 
             cursor.close()
             self._update_viewer_buttons()
-            self.app.statusbar.config(text=f"Loaded spool file {file_name} ({page_width}x{page_length}, {len(raw_lines)} lines) from {self.conn_name}")
+            self.app.statusbar.config(text=f"Loaded spool file {file_name} ({page_width}x{page_length}, {len(raw_lines)} lines)")
         except Exception as e:
+            self.viewer_text.delete("1.0", tk.END)
+            self.app.statusbar.config(text="Failed to load spool file")
             messagebox.showerror("Error", f"Could not read spool file: {e}")
+        finally:
+            self.app.root.config(cursor="")
 
     def _delete_spool_files(self):
         """Delete selected spool files."""
@@ -345,87 +373,23 @@ class SpoolTab:
         # Refresh list
         self._refresh_spool_files()
 
-    def _generate_pdf(self, content, file_path):
-        """Generate a PDF from content using spool file attributes."""
-        from reportlab.lib.pagesizes import letter, landscape
-        from reportlab.lib.units import inch
-        from reportlab.pdfgen import canvas
-
-        # Get spool file attributes and stored lines
-        spool_page_length = 66  # Default lines per page
-        spool_page_width = 132  # Default chars per line
-        lines = None
-
-        if self._current_spool_info:
-            spool_page_length = self._current_spool_info.get("page_length", 66)
-            spool_page_width = self._current_spool_info.get("page_width", 132)
-            lines = self._current_spool_info.get("lines")
-
-        # Fall back to parsing content if no stored lines
-        if not lines:
-            lines = content.split("\n")
-
-        # Use landscape if spool file is wider than 80 characters
-        if spool_page_width > 80:
-            pagesize = landscape(letter)
-            font_size = 6.5  # Smaller to fit 132 chars
-        else:
-            pagesize = letter
-            font_size = 10
-
-        c = canvas.Canvas(file_path, pagesize=pagesize)
-        width, height = pagesize
-
-        # Calculate margins
-        left_margin = 0.3 * inch
-        top_margin = 0.3 * inch
-        bottom_margin = 0.3 * inch
-        usable_height = height - top_margin - bottom_margin
-
-        # Calculate line height to fit spool_page_length lines on the page
-        line_height = usable_height / spool_page_length
-
-        # Starting y position (from top of usable area)
-        start_y = height - top_margin - font_size
-
-        c.setFont("Courier", font_size)
-        y = start_y
-        line_on_page = 0
-
-        for line in lines:
-            # Check if we've reached the spool file's page length
-            if line_on_page >= spool_page_length:
-                c.showPage()
-                c.setFont("Courier", font_size)
-                y = start_y
-                line_on_page = 0
-
-            # Truncate long lines to page width
-            if len(line) > spool_page_width:
-                line = line[:spool_page_width]
-
-            c.drawString(left_margin, y, line)
-            y -= line_height
-            line_on_page += 1
-
-        c.save()
-        return True
-
     def _save_pdf(self):
-        """Save the current viewer content as PDF."""
-        content = self.viewer_text.get("1.0", tk.END).strip()
-        if not content:
-            messagebox.showwarning("Empty", "No spool file content to save.")
+        """Save spool file as PDF using IBM i native PDF generation."""
+        if not self._current_spool_info:
+            messagebox.showwarning("No Spool File", "Please view a spool file first.")
             return
 
-        # Generate filename from job name and file number
-        if self._current_spool_info:
-            job_name = self._current_spool_info.get("job_name", "spool")
-            file_number = self._current_spool_info.get("file_number", "0")
-            default_name = f"{job_name}_{file_number}.pdf"
-        else:
-            default_name = "spoolfile.pdf"
+        file_name = self._current_spool_info.get("file_name")
+        qualified_job = self._current_spool_info.get("qualified_job")
+        file_number = self._current_spool_info.get("file_number")
+        job_name = self._current_spool_info.get("job_name", "spool")
 
+        if not all([file_name, qualified_job, file_number]):
+            messagebox.showerror("Error", "Missing spool file information.")
+            return
+
+        # Ask user where to save
+        default_name = f"{job_name}_{file_number}.pdf"
         file_path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
@@ -435,15 +399,131 @@ class SpoolTab:
         if not file_path:
             return
 
-        try:
-            self._generate_pdf(content, file_path)
-            self.app.statusbar.config(text=f"Saved PDF: {file_path}")
-            if messagebox.askyesno("Saved", f"PDF saved to:\n{file_path}\n\nOpen the PDF now?"):
-                self._open_file(file_path)
-        except ImportError:
-            messagebox.showerror("Error", "reportlab not installed. Run: pip install reportlab")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not save PDF: {e}")
+        def on_success(pdf_path):
+            self.save_pdf_btn.config(state=tk.NORMAL)
+            self.print_btn.config(state=tk.NORMAL)
+            self.app.statusbar.config(text=f"Saved PDF: {pdf_path}")
+            if messagebox.askyesno("Saved", f"PDF saved to:\n{pdf_path}\n\nOpen the PDF now?"):
+                self._open_file(pdf_path)
+
+        def on_error(error):
+            self.save_pdf_btn.config(state=tk.NORMAL)
+            self.print_btn.config(state=tk.NORMAL)
+            self.app.statusbar.config(text="PDF generation failed")
+            messagebox.showerror("Error", f"PDF generation failed:\n{error}")
+
+        # Disable buttons and show progress
+        self.save_pdf_btn.config(state=tk.DISABLED)
+        self.print_btn.config(state=tk.DISABLED)
+
+        self._generate_native_pdf(file_path, on_success, on_error)
+
+    def _generate_native_pdf(self, output_path, on_success, on_error):
+        """Generate PDF using IBM i native CPYSPLF with WSCST(*PDF).
+
+        Args:
+            output_path: Local file path to save PDF
+            on_success: Callback function(file_path) on success
+            on_error: Callback function(error_message) on error
+        """
+        file_name = self._current_spool_info.get("file_name")
+        qualified_job = self._current_spool_info.get("qualified_job")
+        file_number = self._current_spool_info.get("file_number")
+
+        # Parse job parts (format: number/user/name)
+        job_parts = qualified_job.split("/")
+        if len(job_parts) != 3:
+            self.app.root.after(0, on_error, f"Invalid job name format: {qualified_job}")
+            return
+
+        job_number, job_user, job_name_part = job_parts
+
+        # Generate a unique temp file name on IFS
+        import time
+        temp_ifs_path = f"/tmp/sqlbench_pdf_{job_number}_{int(time.time())}.pdf"
+
+        # Show progress with animated dots
+        self._pdf_progress_active = True
+        self._pdf_progress_dots = 0
+
+        def update_progress():
+            if self._pdf_progress_active:
+                self._pdf_progress_dots = (self._pdf_progress_dots + 1) % 4
+                dots = "." * self._pdf_progress_dots
+                self.app.statusbar.config(text=f"Generating PDF{dots}")
+                self.app.root.after(300, update_progress)
+
+        self.app.root.after(0, update_progress)
+
+        def do_generate():
+            try:
+                cursor = self.connection.cursor()
+
+                # Step 1: Generate PDF on IFS using CPYSPLF with WSCST(*PDF)
+                cpysplf_cmd = (
+                    f"CPYSPLF FILE({file_name}) TOFILE(*TOSTMF) "
+                    f"JOB({job_number}/{job_user}/{job_name_part}) SPLNBR({file_number}) "
+                    f"TOSTMF('{temp_ifs_path}') WSCST(*PDF)"
+                )
+
+                try:
+                    cursor.execute("CALL QSYS2.QCMDEXC(?)", (cpysplf_cmd,))
+                    self.connection.commit()
+                except Exception as e:
+                    self._pdf_progress_active = False
+                    self.app.root.after(0, on_error, f"CPYSPLF failed: {e}")
+                    return
+
+                # Step 2: Read the PDF from IFS using base64 encoding to avoid binary issues
+                try:
+                    import base64
+
+                    cursor.execute(
+                        """SELECT BASE64_ENCODE(GET_BLOB_FROM_FILE(?))
+                           FROM SYSIBM.SYSDUMMY1""",
+                        (temp_ifs_path,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        base64_data = row[0]
+                        if isinstance(base64_data, bytes):
+                            base64_data = base64_data.decode('ascii')
+                        base64_data = base64_data.replace('\n', '').replace('\r', '').replace(' ', '')
+                        pdf_data = base64.b64decode(base64_data)
+                    else:
+                        self._pdf_progress_active = False
+                        self.app.root.after(0, on_error, "Failed to read PDF from IFS - no data")
+                        return
+
+                except Exception as e:
+                    self._pdf_progress_active = False
+                    self.app.root.after(0, on_error, f"Failed to read PDF: {e}")
+                    return
+
+                # Step 3: Clean up temp file on IFS
+                try:
+                    rmf_cmd = f"RMVLNK OBJLNK('{temp_ifs_path}')"
+                    cursor.execute("CALL QSYS2.QCMDEXC(?)", (rmf_cmd,))
+                    self.connection.commit()
+                except Exception:
+                    pass  # Ignore cleanup errors
+
+                cursor.close()
+
+                # Step 4: Write to local file
+                with open(output_path, 'wb') as f:
+                    f.write(pdf_data)
+
+                self._pdf_progress_active = False
+                self.app.root.after(0, on_success, output_path)
+
+            except Exception as e:
+                self._pdf_progress_active = False
+                self.app.root.after(0, on_error, str(e))
+
+        # Run in background thread
+        thread = threading.Thread(target=do_generate, daemon=True)
+        thread.start()
 
     def _open_file(self, file_path):
         """Open file with system default application."""
@@ -526,6 +606,11 @@ class SpoolTab:
         dialog.transient(self.frame.winfo_toplevel())
         dialog.grab_set()
 
+        # Apply dark mode if enabled
+        is_dark = self.app.dark_mode_var.get()
+        if is_dark:
+            dialog.configure(bg="#2b2b2b")
+
         # Printer selection
         ttk.Label(dialog, text="Select Printer:").pack(anchor=tk.W, padx=10, pady=(10, 5))
 
@@ -560,34 +645,49 @@ class SpoolTab:
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
 
     def _send_to_printer(self, content, printer, copies):
-        """Send content to the specified printer by generating a PDF first."""
-        try:
-            # Generate PDF to temp file
-            temp_path = tempfile.mktemp(suffix='.pdf')
-            self._generate_pdf(content, temp_path)
+        """Send content to the specified printer by generating a native PDF first."""
+        if not self._current_spool_info:
+            messagebox.showerror("Error", "No spool file information available.")
+            return
 
-            system = platform.system()
-            if system in ("Linux", "Darwin"):
-                cmd = ["lp", "-n", str(copies)]
-                if printer:
-                    cmd.extend(["-d", printer])
-                cmd.append(temp_path)
-                subprocess.run(cmd, check=True)
-                self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
-            elif system == "Windows":
-                import os
-                # Print PDF using default handler
-                for _ in range(copies):
-                    os.startfile(temp_path, "print")
-                self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
-        except ImportError:
-            messagebox.showerror("Error", "reportlab not installed. Run: pip install reportlab")
-        except FileNotFoundError:
-            messagebox.showerror("Error", "Print command not found.\nEnsure CUPS (Linux/Mac) is available.")
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Error", f"Print failed: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not print: {e}")
+        # Generate PDF to temp file, then print
+        temp_path = tempfile.mktemp(suffix='.pdf')
+
+        def on_success(pdf_path):
+            self.save_pdf_btn.config(state=tk.NORMAL)
+            self.print_btn.config(state=tk.NORMAL)
+            try:
+                system = platform.system()
+                if system in ("Linux", "Darwin"):
+                    cmd = ["lp", "-n", str(copies)]
+                    if printer:
+                        cmd.extend(["-d", printer])
+                    cmd.append(pdf_path)
+                    subprocess.run(cmd, check=True)
+                    self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
+                elif system == "Windows":
+                    import os
+                    for _ in range(copies):
+                        os.startfile(pdf_path, "print")
+                    self.app.statusbar.config(text=f"Sent to printer: {printer or 'default'}")
+            except FileNotFoundError:
+                messagebox.showerror("Error", "Print command not found.\nEnsure CUPS (Linux/Mac) is available.")
+            except subprocess.CalledProcessError as e:
+                messagebox.showerror("Error", f"Print failed: {e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not print: {e}")
+
+        def on_error(error):
+            self.save_pdf_btn.config(state=tk.NORMAL)
+            self.print_btn.config(state=tk.NORMAL)
+            self.app.statusbar.config(text="Print failed - PDF generation error")
+            messagebox.showerror("Error", f"Could not generate PDF for printing:\n{error}")
+
+        # Disable buttons during PDF generation
+        self.save_pdf_btn.config(state=tk.DISABLED)
+        self.print_btn.config(state=tk.DISABLED)
+
+        self._generate_native_pdf(temp_path, on_success, on_error)
 
     def _create_viewer_context_menu(self):
         """Create right-click context menu for viewer text."""
@@ -603,10 +703,7 @@ class SpoolTab:
 
     def _show_context_menu(self, event):
         """Show context menu at mouse position."""
-        try:
-            self.viewer_context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.viewer_context_menu.grab_release()
+        self.viewer_context_menu.tk_popup(event.x_root, event.y_root, 0)
 
     def _select_all(self):
         """Select all text in viewer."""

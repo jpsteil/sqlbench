@@ -1473,6 +1473,9 @@ class SQLBenchApp:
             except Exception:
                 pass
 
+        # Restore the last active tab
+        self._restore_active_tab()
+
     def _reset_layout(self):
         """Reset layout to defaults."""
         # Clear saved layout settings
@@ -1520,6 +1523,7 @@ class SQLBenchApp:
         self._save_geometry()
         self._save_layout()
         self._save_tabs()
+        self._save_active_tab()
         # Close all connections
         for name, data in self.connections.items():
             try:
@@ -1553,6 +1557,31 @@ class SQLBenchApp:
                 pass
 
         self.db.save_tabs(tabs)
+
+    def _save_active_tab(self):
+        """Save the currently active tab index."""
+        try:
+            current_tab = self.notebook.select()
+            if current_tab:
+                tabs = self.notebook.tabs()
+                for idx, tab_id in enumerate(tabs):
+                    if tab_id == current_tab:
+                        self.db.set_setting("last_active_tab", str(idx))
+                        return
+        except Exception:
+            pass
+
+    def _restore_active_tab(self):
+        """Restore the last active tab."""
+        try:
+            last_tab_idx = self.db.get_setting("last_active_tab")
+            if last_tab_idx is not None:
+                idx = int(last_tab_idx)
+                tabs = self.notebook.tabs()
+                if 0 <= idx < len(tabs):
+                    self.notebook.select(tabs[idx])
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()
