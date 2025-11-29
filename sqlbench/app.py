@@ -1121,7 +1121,6 @@ class SQLBenchApp:
         # Save current state before restart
         self._save_geometry()
         self._save_active_tab()
-        self._save_connection_state()
 
         # Close connections gracefully
         for name in list(self.connections.keys()):
@@ -1130,10 +1129,7 @@ class SQLBenchApp:
             except Exception:
                 pass
 
-        self.root.destroy()
-
-        # Re-execute the application
-        # Use subprocess.Popen to start new process, then exit current
+        # Start new process BEFORE destroying the window
         if sys.argv[0].endswith('sqlbench') or 'sqlbench' in sys.argv[0]:
             # Running via entry point script (e.g., pipx)
             subprocess.Popen([sys.argv[0]])
@@ -1141,7 +1137,9 @@ class SQLBenchApp:
             # Running via python -m sqlbench
             subprocess.Popen([sys.executable, '-m', 'sqlbench'])
 
-        sys.exit(0)
+        # Now destroy and exit
+        self.root.destroy()
+        os._exit(0)
 
     def _show_settings(self):
         """Show settings dialog."""
