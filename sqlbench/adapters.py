@@ -1,32 +1,6 @@
 """Database adapters for different database types."""
 
-import os
 from abc import ABC, abstractmethod
-from pathlib import Path
-
-
-def _setup_ibm_db_environment():
-    """Set up environment variables for ibm_db if clidriver is installed."""
-    if os.environ.get("IBM_DB_HOME"):
-        return  # Already configured
-
-    # Check common install locations
-    clidriver_paths = [
-        Path.home() / "db2drivers" / "clidriver",
-        Path("/opt/ibm/db2/clidriver"),
-        Path("/opt/clidriver"),
-    ]
-
-    for cli_path in clidriver_paths:
-        if (cli_path / "lib").exists():
-            os.environ["IBM_DB_HOME"] = str(cli_path)
-            lib_path = os.environ.get("LD_LIBRARY_PATH", "")
-            os.environ["LD_LIBRARY_PATH"] = f"{cli_path}/lib:{lib_path}"
-            break
-
-
-# Set up ibm_db environment before any imports
-_setup_ibm_db_environment()
 
 
 class DBAdapter(ABC):
@@ -199,109 +173,6 @@ class IBMiAdapter(DBAdapter):
             WHERE TABLE_TYPE IN ('T', 'P', 'V')
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
-
-
-class IBMiDBAdapter(DBAdapter):
-    """Adapter for IBM i (AS/400) via ibm_db (native CLI driver)."""
-
-    db_type = "ibmi_db"
-    display_name = "IBM i (ibm_db)"
-    default_port = 446  # DRDA port
-    requires_database = False
-    supports_spool = True
-    required_module = "ibm_db"
-    install_hint = "pip install sqlbench[ibmi-db]"
-
-    def connect(self, host, user, password, port=None, database=None):
-        import ibm_db_dbi
-
-        # Build connection string for IBM i
-        # DATABASE can be *LOCAL or the RDB name
-        db_name = database if database else "*LOCAL"
-        port_num = port if port else 446
-
-        conn_str = (
-            f"DATABASE={db_name};"
-            f"HOSTNAME={host};"
-            f"PORT={port_num};"
-            f"PROTOCOL=TCPIP;"
-            f"UID={user};"
-            f"PWD={password};"
-        )
-
-        # ibm_db_dbi provides DB-API 2.0 compliant interface
-        return ibm_db_dbi.connect(conn_str, "", "")
-
-    def get_version(self, conn):
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT OS_VERSION, OS_RELEASE FROM SYSIBMADM.ENV_SYS_INFO")
-            row = cursor.fetchone()
-            cursor.close()
-            if row:
-                return f"{row[0]}.{row[1]}"
-        except Exception:
-            pass
-        return None
-
-    def add_pagination(self, sql, limit, offset=0):
-        """IBM i uses OFFSET/FETCH syntax."""
-        sql_stripped = sql.strip()
-        while sql_stripped.endswith(';'):
-            sql_stripped = sql_stripped[:-1].strip()
-
-        if offset > 0:
-            return f"{sql_stripped} OFFSET {offset} ROWS FETCH FIRST {limit} ROWS ONLY"
-        return f"{sql_stripped} FETCH FIRST {limit} ROWS ONLY"
-
-    def get_select_limit_query(self, table_ref, limit):
-        """Get a SELECT query with row limit for IBM i."""
-        return f"SELECT * FROM {table_ref} FETCH FIRST {limit} ROWS ONLY"
-
-    def get_version_query(self):
-        """Get the SQL to retrieve IBM i version."""
-        return "SELECT OS_VERSION || '.' || OS_RELEASE FROM SYSIBMADM.ENV_SYS_INFO"
-
-    def get_columns_query(self, tables):
-        if not tables:
-            return None
-
-        table_conditions = []
-        for table in tables:
-            if '.' in table:
-                schema, tbl = table.split('.', 1)
-                table_conditions.append(
-                    f"(TABLE_SCHEMA = '{schema.upper()}' AND TABLE_NAME = '{tbl.upper()}')"
-                )
-            else:
-                table_conditions.append(f"TABLE_NAME = '{table.upper()}'")
-
-        where_clause = " OR ".join(table_conditions)
-        return f"""
-            SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, LENGTH, NUMERIC_SCALE
-            FROM QSYS2.SYSCOLUMNS
-            WHERE {where_clause}
-            ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-        """
-
-    def get_tables_query(self):
-        """Get tables from IBM i - returns schema, table_name, table_type."""
-        return """
-            SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
-            FROM QSYS2.SYSTABLES
-            WHERE TABLE_TYPE IN ('T', 'P', 'V')
-            ORDER BY TABLE_SCHEMA, TABLE_NAME
-        """
-
-    def is_numeric_type(self, type_code):
-        """Check if a type_code represents a numeric type for ibm_db."""
-        # ibm_db uses type codes similar to CLI
-        # Check for Python numeric types as fallback
-        from decimal import Decimal
-        if isinstance(type_code, type):
-            return type_code in (int, float, Decimal)
-        # ibm_db type codes for numeric: various integer constants
-        return False
 
 
 class MySQLAdapter(DBAdapter):
@@ -513,7 +384,6 @@ class PostgreSQLAdapter(DBAdapter):
 # Registry of available adapters
 ADAPTERS = {
     'ibmi': IBMiAdapter,
-    'ibmi_db': IBMiDBAdapter,
     'mysql': MySQLAdapter,
     'postgresql': PostgreSQLAdapter,
 }

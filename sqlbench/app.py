@@ -1037,11 +1037,7 @@ class SQLBenchApp:
                     text=True
                 )
                 if result.returncode == 0:
-                    self.root.after(0, lambda: tk.messagebox.showinfo(
-                        "Upgrade Complete",
-                        "SQLBench has been upgraded.\n\n"
-                        "Please restart the application to use the new version."
-                    ))
+                    self.root.after(0, self._show_restart_dialog)
                 else:
                     error = result.stderr or result.stdout or "Unknown error"
                     self.root.after(0, lambda: tk.messagebox.showerror(
@@ -1067,6 +1063,56 @@ class SQLBenchApp:
     def _show_about(self):
         from sqlbench.version import __version__
         tk.messagebox.showinfo("About", f"SQLBench v{__version__}\nMulti-database SQL Workbench")
+
+    def _show_restart_dialog(self, message="SQLBench has been upgraded.\n\nPlease restart the application to use the new version."):
+        """Show a dialog with restart option."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Restart Required")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        # Message
+        msg_frame = ttk.Frame(dialog, padding=20)
+        msg_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(msg_frame, text=message, wraplength=300).pack()
+
+        # Buttons
+        btn_frame = ttk.Frame(dialog, padding=(20, 0, 20, 20))
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Restart Now", command=lambda: self._restart_app()).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Later", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        # Center on parent
+        dialog.update_idletasks()
+        w = dialog.winfo_width()
+        h = dialog.winfo_height()
+        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+    def _restart_app(self):
+        """Restart the application."""
+        import sys
+        import os
+
+        # Save current state before restart
+        self._save_geometry()
+        self._save_active_tab()
+        self._save_connection_state()
+
+        # Close connections gracefully
+        for name in list(self.connections.keys()):
+            try:
+                self.connections[name]['conn'].close()
+            except Exception:
+                pass
+
+        self.root.destroy()
+
+        # Re-execute the application
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
 
     def _show_settings(self):
         """Show settings dialog."""
