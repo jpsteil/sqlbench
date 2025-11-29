@@ -63,6 +63,25 @@ class SQLBenchApp:
         except Exception:
             pass  # Silently fail if icon cannot be loaded
 
+    def _load_db_icons(self):
+        """Load database type icons for the connection tree."""
+        from pathlib import Path
+        self._db_icons = {}
+        icon_map = {
+            "ibmi": "db_ibmi.png",
+            "mysql": "db_mysql.png",
+            "postgresql": "db_postgresql.png",
+            "unknown": "db_unknown.png",
+        }
+        resources = Path(__file__).parent / "resources"
+        for db_type, filename in icon_map.items():
+            try:
+                icon_path = resources / filename
+                if icon_path.exists():
+                    self._db_icons[db_type] = tk.PhotoImage(file=str(icon_path))
+            except Exception:
+                pass
+
     def _create_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -112,6 +131,9 @@ class SQLBenchApp:
 
         # Store loaded tables for filtering
         self._loaded_tables = {}  # conn_name -> list of (schema, table_name, table_type)
+
+        # Load database type icons
+        self._load_db_icons()
 
         # Connection tree
         self.conn_tree = ttk.Treeview(conn_frame, show="tree", selectmode="browse")
@@ -195,11 +217,16 @@ class SQLBenchApp:
         for conn in self.db.get_connections():
             name = conn["name"]
             db_type = conn.get("db_type", "ibmi")
-            type_indicator = {"ibmi": "[i]", "mysql": "[M]", "postgresql": "[P]"}.get(db_type, "[?]")
+
+            # Get icon for database type
+            icon = self._db_icons.get(db_type) or self._db_icons.get("unknown")
 
             # Show connected status
             status = " (connected)" if name in self.connections else ""
-            node_id = self.conn_tree.insert("", tk.END, iid=name, text=f"{type_indicator} {name}{status}")
+            if icon:
+                node_id = self.conn_tree.insert("", tk.END, iid=name, text=f"  {name}{status}", image=icon)
+            else:
+                node_id = self.conn_tree.insert("", tk.END, iid=name, text=f"{name}{status}")
 
             # Add placeholder child so connection can be expanded (if connected)
             if name in self.connections:

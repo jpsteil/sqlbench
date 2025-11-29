@@ -9,6 +9,11 @@ import threading
 from sqlbench.adapters import get_adapter_choices, get_adapter, get_unavailable_adapters, ADAPTERS
 
 
+def _get_resource_path(filename):
+    """Get the path to a resource file."""
+    return Path(__file__).parent.parent / "resources" / filename
+
+
 class ConnectionDialog:
     def __init__(self, parent, db, edit_name=None, app=None):
         self.db = db
@@ -55,18 +60,36 @@ class ConnectionDialog:
 
         self.top.configure(bg=self.bg)
 
+    def _load_db_icons(self):
+        """Load database type icons."""
+        self._db_icons = {}
+        icon_map = {
+            "ibmi": "db_ibmi.png",
+            "mysql": "db_mysql.png",
+            "postgresql": "db_postgresql.png",
+            "unknown": "db_unknown.png",
+        }
+        for db_type, filename in icon_map.items():
+            try:
+                icon_path = _get_resource_path(filename)
+                if icon_path.exists():
+                    self._db_icons[db_type] = tk.PhotoImage(file=str(icon_path))
+            except Exception:
+                pass
+
     def _create_widgets(self):
+        # Load database icons
+        self._load_db_icons()
+
         # Left side - list
         list_frame = ttk.Frame(self.top)
         list_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5, pady=5)
 
-        self.conn_listbox = tk.Listbox(list_frame, width=25,
-                                        bg=self.list_bg, fg=self.fg,
-                                        selectbackground=self.select_bg,
-                                        selectforeground=self.select_fg,
-                                        highlightthickness=0)
-        self.conn_listbox.pack(fill=tk.BOTH, expand=True)
-        self.conn_listbox.bind("<<ListboxSelect>>", self._on_select)
+        # Use Treeview instead of Listbox to support icons
+        self.conn_tree = ttk.Treeview(list_frame, selectmode="browse", show="tree")
+        self.conn_tree.column("#0", width=180)
+        self.conn_tree.pack(fill=tk.BOTH, expand=True)
+        self.conn_tree.bind("<<TreeviewSelect>>", self._on_select)
 
         btn_frame = ttk.Frame(list_frame)
         btn_frame.pack(fill=tk.X, pady=5)
@@ -200,17 +223,25 @@ class ConnectionDialog:
             self.database_entry.grid_remove()
 
     def _refresh_list(self):
-        self.conn_listbox.delete(0, tk.END)
+        # Clear existing items
+        for item in self.conn_tree.get_children():
+            self.conn_tree.delete(item)
+
         self._connections = self.db.get_connections()
         available_types = {choice[0] for choice in get_adapter_choices()}
+
         for conn in self._connections:
-            # Show type indicator
             db_type = conn.get("db_type", "ibmi")
-            type_indicator = {"ibmi": "[i]", "mysql": "[M]", "postgresql": "[P]"}.get(db_type, "[?]")
-            # Mark unavailable connections
+            # Use unknown icon if adapter not available
             if db_type not in available_types:
-                type_indicator = "[!]"
-            self.conn_listbox.insert(tk.END, f"{type_indicator} {conn['name']}")
+                icon = self._db_icons.get("unknown")
+            else:
+                icon = self._db_icons.get(db_type) or self._db_icons.get("unknown")
+
+            if icon:
+                self.conn_tree.insert("", tk.END, text=conn["name"], image=icon, values=(conn["id"],))
+            else:
+                self.conn_tree.insert("", tk.END, text=conn["name"], values=(conn["id"],))
 
     def _load_connection_by_name(self, name):
         """Load a specific connection into the form by name."""
@@ -267,16 +298,17 @@ class ConnectionDialog:
         self.pass_entry.insert(0, conn["password"])
 
     def _on_select(self, event):
-        selection = self.conn_listbox.curselection()
+        selection = self.conn_tree.selection()
         if not selection:
             return
 
-        idx = selection[0]
-        if idx < len(self._connections):
-            conn = self._connections[idx]
-            self._current_id = conn["id"]
+        item = selection[0]
+        values = self.conn_tree.item(item, "values")
+        if values:
+            conn_id = int(values[0])
+            self._current_id = conn_id
             # Fetch full connection with password
-            full_conn = self.db.get_connection_by_id(conn["id"])
+            full_conn = self.db.get_connection_by_id(conn_id)
             if full_conn:
                 self._fill_form(full_conn)
 
@@ -321,15 +353,17 @@ class ConnectionDialog:
         messagebox.showinfo("Saved", f"Connection '{name}' saved.", parent=self.top)
 
     def _delete(self):
-        selection = self.conn_listbox.curselection()
+        selection = self.conn_tree.selection()
         if not selection:
             return
 
-        idx = selection[0]
-        if idx < len(self._connections):
-            conn = self._connections[idx]
-            if messagebox.askyesno("Confirm Delete", f"Delete connection '{conn['name']}'?", parent=self.top):
-                self.db.delete_connection(conn["id"])
+        item = selection[0]
+        conn_name = self.conn_tree.item(item, "text")
+        values = self.conn_tree.item(item, "values")
+        if values:
+            conn_id = int(values[0])
+            if messagebox.askyesno("Confirm Delete", f"Delete connection '{conn_name}'?", parent=self.top):
+                self.db.delete_connection(conn_id)
                 self._refresh_list()
                 self._new()
 
