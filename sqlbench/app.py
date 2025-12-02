@@ -172,6 +172,7 @@ class SQLBenchApp:
 
         # SQL tab keyboard shortcuts
         self.root.bind("<F5>", self._run_active_sql_query)
+        self.root.bind("<Control-F5>", self._run_active_sql_script)
         self.root.bind("<Escape>", self._cancel_active_sql_query)
         self.root.bind("<Control-s>", self._save_active_sql_query)
         self.root.bind("<Control-S>", self._save_active_sql_query)
@@ -525,6 +526,18 @@ class SQLBenchApp:
             tab_frame = self.notebook.nametowidget(selected)
             if hasattr(tab_frame, 'sql_tab'):
                 tab_frame.sql_tab._run_query()
+        except Exception:
+            pass
+
+    def _run_active_sql_script(self, event=None):
+        """Run all statements on the currently active SQL tab."""
+        try:
+            selected = self.notebook.select()
+            if not selected:
+                return
+            tab_frame = self.notebook.nametowidget(selected)
+            if hasattr(tab_frame, 'sql_tab'):
+                tab_frame.sql_tab._run_script()
         except Exception:
             pass
 

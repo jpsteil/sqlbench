@@ -95,6 +95,23 @@ class Database:
                     tab_order INTEGER
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_name TEXT NOT NULL,
+                    sql TEXT NOT NULL,
+                    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    duration REAL,
+                    row_count INTEGER,
+                    status TEXT,
+                    error_message TEXT
+                )
+            """)
+            # Create index for faster lookups by connection
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_query_log_conn
+                ON query_log(connection_name, executed_at DESC)
+            """)
             conn.commit()
 
     # Connection methods
@@ -212,4 +229,38 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
+            conn.commit()
+
+    # Query log methods
+    def log_query(self, connection_name, sql, duration=None, row_count=None, status="success", error_message=None):
+        """Log a SQL query execution."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO query_log (connection_name, sql, duration, row_count, status, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (connection_name, sql, duration, row_count, status, error_message)
+            )
+            conn.commit()
+
+    def get_query_log(self, connection_name, limit=500):
+        """Get query log for a connection, most recent first."""
+        with self._get_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """SELECT id, sql, executed_at, duration, row_count, status, error_message
+                   FROM query_log
+                   WHERE connection_name = ?
+                   ORDER BY executed_at DESC
+                   LIMIT ?""",
+                (connection_name, limit)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def clear_query_log(self, connection_name=None):
+        """Clear query log. If connection_name is None, clears all."""
+        with self._get_conn() as conn:
+            if connection_name:
+                conn.execute("DELETE FROM query_log WHERE connection_name = ?", (connection_name,))
+            else:
+                conn.execute("DELETE FROM query_log")
             conn.commit()

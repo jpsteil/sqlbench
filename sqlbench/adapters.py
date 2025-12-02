@@ -87,6 +87,12 @@ class DBAdapter(ABC):
         """Get a SELECT query with row limit for a table."""
         return f"SELECT * FROM {table_ref} LIMIT {limit}"
 
+    def get_primary_key_columns(self, conn, schema, table):
+        """Get list of primary key column names for a table.
+        Returns list of column names or empty list if no PK.
+        """
+        return []  # Default: no PK support
+
     def get_version_query(self):
         """Get the SQL to retrieve database version."""
         return "SELECT VERSION()"
@@ -174,6 +180,28 @@ class IBMiAdapter(DBAdapter):
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
 
+    def get_primary_key_columns(self, conn, schema, table):
+        """Get primary key columns for IBM i table."""
+        try:
+            cursor = conn.cursor()
+            sql = """
+                SELECT COLUMN_NAME
+                FROM QSYS2.SYSKEYCST
+                WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
+                  AND TABLE_NAME = ?
+            """
+            params = [table.upper()]
+            if schema:
+                sql += " AND TABLE_SCHEMA = ?"
+                params.append(schema.upper())
+            sql += " ORDER BY ORDINAL_POSITION"
+            cursor.execute(sql, params)
+            columns = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            return columns
+        except Exception:
+            return []
+
 
 class MySQLAdapter(DBAdapter):
     """Adapter for MySQL."""
@@ -241,6 +269,28 @@ class MySQLAdapter(DBAdapter):
             WHERE TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
+
+    def get_primary_key_columns(self, conn, schema, table):
+        """Get primary key columns for MySQL table."""
+        try:
+            cursor = conn.cursor()
+            sql = """
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE CONSTRAINT_NAME = 'PRIMARY'
+                  AND TABLE_NAME = %s
+            """
+            params = [table]
+            if schema:
+                sql += " AND TABLE_SCHEMA = %s"
+                params.append(schema)
+            sql += " ORDER BY ORDINAL_POSITION"
+            cursor.execute(sql, params)
+            columns = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            return columns
+        except Exception:
+            return []
 
     def is_numeric_type(self, type_code):
         """Check if a type_code represents a numeric type for MySQL."""
@@ -350,6 +400,38 @@ class PostgreSQLAdapter(DBAdapter):
             WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
             ORDER BY table_schema, table_name
         """
+
+    def get_primary_key_columns(self, conn, schema, table):
+        """Get primary key columns for PostgreSQL table."""
+        try:
+            cursor = conn.cursor()
+            sql = """
+                SELECT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                  AND tc.table_name = %s
+            """
+            params = [table]
+            if schema:
+                sql += " AND tc.table_schema = %s"
+                params.append(schema)
+            else:
+                sql += " AND tc.table_schema = 'public'"
+            sql += " ORDER BY kcu.ordinal_position"
+            cursor.execute(sql, params)
+            columns = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            conn.rollback()  # Clear any transaction state
+            return columns
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return []
 
     def is_numeric_type(self, type_code):
         """Check if a type_code represents a numeric type for PostgreSQL."""

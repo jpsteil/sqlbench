@@ -31,6 +31,16 @@ class SQLTab:
         self._sort_reverse = False  # Sort direction
         self._results_base_widths = {}  # Base column widths (at font size 10)
 
+        # Inline editing state
+        self._editable = False  # Whether current results are editable
+        self._edit_table = None  # Table name for editing
+        self._edit_schema = None  # Schema name for editing
+        self._pk_columns = []  # Primary key column names
+        self._pk_indices = []  # Indices of PK columns in result set
+        self._original_values = {}  # iid -> original row tuple
+        self._modified_cells = {}  # iid -> {col_index: new_value}
+        self._edit_entry = None  # Current edit Entry widget
+
         self._create_widgets()
         self._bind_keys()
 
@@ -40,6 +50,118 @@ class SQLTab:
         self.sql_text.bind("<Control-A>", self._select_all)
         self.sql_text.bind("<Control-Shift-f>", lambda e: self._format_sql())
         self.sql_text.bind("<Control-Shift-F>", lambda e: self._format_sql())
+
+    def _is_connection_error(self, error_msg):
+        """Check if error indicates a lost connection."""
+        connection_errors = [
+            "connection", "closed", "terminated", "lost", "reset",
+            "server closed", "not connected", "connection refused",
+            "broken pipe", "network", "timeout", "eof"
+        ]
+        error_lower = error_msg.lower()
+        return any(err in error_lower for err in connection_errors)
+
+    def _try_reconnect(self):
+        """Try to reconnect to the database. Returns True if successful."""
+        try:
+            conn_data = self.app.connections.get(self.conn_name)
+            if not conn_data:
+                return False
+
+            conn_info = conn_data.get("info")
+            if not conn_info:
+                return False
+
+            # Create new connection
+            new_conn = self.adapter.connect(
+                host=conn_info['host'],
+                user=conn_info['user'],
+                password=conn_info['password'],
+                port=conn_info.get('port'),
+                database=conn_info.get('database')
+            )
+
+            # Update connection in app and this tab
+            self.connection = new_conn
+            conn_data["conn"] = new_conn
+
+            return True
+        except Exception:
+            return False
+
+    def _parse_single_table_select(self, sql):
+        """
+        Parse SQL to detect if it's a simple single-table SELECT.
+        Returns (schema, table) tuple if editable, or (None, None) if not.
+        """
+        sql_clean = sql.strip().rstrip(';')
+        sql_upper = sql_clean.upper()
+
+        # Must be a SELECT statement
+        if not sql_upper.startswith('SELECT'):
+            return None, None
+
+        # Reject if contains JOIN keywords
+        join_keywords = [' JOIN ', ' INNER JOIN ', ' LEFT JOIN ', ' RIGHT JOIN ',
+                         ' OUTER JOIN ', ' CROSS JOIN ', ' NATURAL JOIN ']
+        for kw in join_keywords:
+            if kw in sql_upper:
+                return None, None
+
+        # Reject if contains UNION, INTERSECT, EXCEPT
+        if ' UNION ' in sql_upper or ' INTERSECT ' in sql_upper or ' EXCEPT ' in sql_upper:
+            return None, None
+
+        # Reject if contains subquery in FROM clause (simplified check)
+        # Look for SELECT after FROM
+        from_pos = sql_upper.find(' FROM ')
+        if from_pos == -1:
+            return None, None
+
+        after_from = sql_upper[from_pos + 6:]
+        # Check for subquery - opening paren before table name
+        after_from_stripped = after_from.lstrip()
+        if after_from_stripped.startswith('('):
+            return None, None
+
+        # Extract table name from FROM clause
+        # Pattern: FROM [schema.]table [alias] [WHERE|ORDER|GROUP|HAVING|LIMIT|FETCH|;|end]
+        from_match = re.search(
+            r'\bFROM\s+(["\w]+(?:\.["\w]+)?)\s*(?:AS\s+\w+|\w+)?(?:\s+WHERE|\s+ORDER|\s+GROUP|\s+HAVING|\s+LIMIT|\s+FETCH|\s*$)',
+            sql_clean,
+            re.IGNORECASE
+        )
+
+        if not from_match:
+            # Try simpler pattern
+            from_match = re.search(r'\bFROM\s+(["\w]+(?:\.["\w]+)?)', sql_clean, re.IGNORECASE)
+
+        if not from_match:
+            return None, None
+
+        table_ref = from_match.group(1)
+
+        # Check for comma (multiple tables)
+        # Find the end of the FROM clause
+        where_pos = sql_upper.find(' WHERE ', from_pos)
+        order_pos = sql_upper.find(' ORDER ', from_pos)
+        group_pos = sql_upper.find(' GROUP ', from_pos)
+        end_pos = min(p for p in [where_pos, order_pos, group_pos, len(sql_upper)] if p > 0)
+        from_clause = sql_upper[from_pos + 6:end_pos]
+
+        if ',' in from_clause:
+            return None, None
+
+        # Parse schema.table
+        if '.' in table_ref:
+            parts = table_ref.split('.')
+            schema = parts[0].strip('"').strip("'")
+            table = parts[1].strip('"').strip("'")
+        else:
+            schema = None
+            table = table_ref.strip('"').strip("'")
+
+        return schema, table
 
     def _select_all(self, event=None):
         """Select all text in SQL editor."""
@@ -275,9 +397,13 @@ class SQLTab:
         btn_frame = ttk.Frame(self.frame)
         btn_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
 
-        self.run_btn = ttk.Button(btn_frame, text="Run", command=self._run_query)
+        self.run_btn = ttk.Button(btn_frame, text="Execute", command=self._run_query)
         self.run_btn.pack(side=tk.LEFT, padx=2)
-        self._add_tooltip(self.run_btn, "Run query (F5)")
+        self._add_tooltip(self.run_btn, "Execute statement at cursor (F5)")
+
+        self.run_script_btn = ttk.Button(btn_frame, text="Execute Script", command=self._run_script)
+        self.run_script_btn.pack(side=tk.LEFT, padx=2)
+        self._add_tooltip(self.run_script_btn, "Execute all statements (Ctrl+F5)")
 
         self.cancel_btn = ttk.Button(btn_frame, text="Cancel", command=self._cancel_query, state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT, padx=2)
@@ -351,6 +477,9 @@ class SQLTab:
 
         # Tab 3: Statistics
         self._create_statistics_tab()
+
+        # Tab 4: Log
+        self._create_log_tab()
 
     def _create_results_tab(self):
         """Create the Results tab with data grid and pagination."""
@@ -428,6 +557,145 @@ class SQLTab:
         self.stats_text.insert("1.0", "Execute a query to see statistics.")
         self.stats_text.config(state=tk.DISABLED)
 
+    def _create_log_tab(self):
+        """Create the Log tab showing query execution history."""
+        log_tab = ttk.Frame(self.results_notebook)
+        self.results_notebook.add(log_tab, text="Log")
+
+        # Top controls
+        log_controls = ttk.Frame(log_tab)
+        log_controls.pack(side=tk.TOP, fill=tk.X, padx=5, pady=3)
+
+        ttk.Button(log_controls, text="Refresh", command=self._refresh_log_tab).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_controls, text="Clear Log", command=self._clear_log).pack(side=tk.LEFT, padx=2)
+
+        # Log treeview
+        columns = ("time", "sql", "status", "duration", "rows", "error")
+        self.log_tree = ttk.Treeview(log_tab, columns=columns, show="headings", selectmode="browse")
+
+        self.log_tree.heading("time", text="Time")
+        self.log_tree.heading("sql", text="SQL")
+        self.log_tree.heading("status", text="Status")
+        self.log_tree.heading("duration", text="Duration")
+        self.log_tree.heading("rows", text="Rows")
+        self.log_tree.heading("error", text="Error")
+
+        self.log_tree.column("time", width=140, minwidth=100)
+        self.log_tree.column("sql", width=300, minwidth=200)
+        self.log_tree.column("status", width=60, minwidth=50)
+        self.log_tree.column("duration", width=70, minwidth=50, anchor="e")
+        self.log_tree.column("rows", width=60, minwidth=40, anchor="e")
+        self.log_tree.column("error", width=300, minwidth=100)
+
+        log_scroll_y = ttk.Scrollbar(log_tab, orient=tk.VERTICAL, command=self.log_tree.yview)
+        log_scroll_x = ttk.Scrollbar(log_tab, orient=tk.HORIZONTAL, command=self.log_tree.xview)
+        self.log_tree.configure(yscrollcommand=log_scroll_y.set, xscrollcommand=log_scroll_x.set)
+
+        log_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        log_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.log_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Double-click to copy SQL to editor
+        self.log_tree.bind("<Double-1>", self._on_log_double_click)
+
+        # Context menu
+        self.log_context_menu = tk.Menu(self.log_tree, tearoff=0)
+        self.log_context_menu.add_command(label="Copy SQL to Editor", command=self._copy_log_sql_to_editor)
+        self.log_context_menu.add_command(label="Copy SQL to Clipboard", command=self._copy_log_sql_to_clipboard)
+        self.log_tree.bind("<Button-3>", self._show_log_context_menu)
+
+        # Configure tag for error rows
+        self.log_tree.tag_configure("error", foreground="#ff6b6b")
+
+        # Initial load
+        self._refresh_log_tab()
+
+    def _refresh_log_tab(self):
+        """Refresh the log tab with latest query history."""
+        if not hasattr(self, 'log_tree'):
+            return
+
+        self.log_tree.delete(*self.log_tree.get_children())
+
+        logs = self.app.db.get_query_log(self.conn_name, limit=500)
+
+        for log in logs:
+            time_str = log['executed_at'][:19] if log['executed_at'] else ""
+            sql = log['sql'].replace('\n', ' ').replace('\r', '')[:200] if log['sql'] else ""
+            status = log['status'] or "success"
+            duration = f"{log['duration']:.3f}s" if log['duration'] else ""
+            rows = str(log['row_count']) if log['row_count'] is not None else ""
+            error = log['error_message'] or ""
+
+            tags = ("error",) if status == "error" else ()
+            self.log_tree.insert("", tk.END, values=(time_str, sql, status, duration, rows, error),
+                               tags=tags, iid=str(log['id']))
+
+    def _clear_log(self):
+        """Clear the query log for this connection."""
+        if messagebox.askyesno("Clear Log", f"Clear all log entries for {self.conn_name}?"):
+            self.app.db.clear_query_log(self.conn_name)
+            self._refresh_log_tab()
+            # Also refresh other tabs for same connection
+            self._notify_log_change()
+
+    def _on_log_double_click(self, event):
+        """Handle double-click on log entry - copy SQL to editor."""
+        self._copy_log_sql_to_editor()
+
+    def _show_log_context_menu(self, event):
+        """Show context menu for log entry."""
+        item = self.log_tree.identify_row(event.y)
+        if item:
+            self.log_tree.selection_set(item)
+            self.log_context_menu.tk_popup(event.x_root, event.y_root, 0)
+
+    def _copy_log_sql_to_editor(self):
+        """Copy selected log SQL to the SQL editor."""
+        selection = self.log_tree.selection()
+        if not selection:
+            return
+
+        log_id = int(selection[0])
+        logs = self.app.db.get_query_log(self.conn_name, limit=500)
+        for log in logs:
+            if log['id'] == log_id:
+                sql = log['sql']
+                # Insert at cursor or replace selection
+                try:
+                    self.sql_text.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass  # No selection
+                self.sql_text.insert("insert", sql)
+                self._highlight_sql()
+                break
+
+    def _copy_log_sql_to_clipboard(self):
+        """Copy selected log SQL to clipboard."""
+        selection = self.log_tree.selection()
+        if not selection:
+            return
+
+        log_id = int(selection[0])
+        logs = self.app.db.get_query_log(self.conn_name, limit=500)
+        for log in logs:
+            if log['id'] == log_id:
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append(log['sql'])
+                self.app.statusbar.config(text="SQL copied to clipboard")
+                break
+
+    def _notify_log_change(self):
+        """Notify other SQL tabs for the same connection to refresh their logs."""
+        for tab_id in self.app.notebook.tabs():
+            try:
+                tab_frame = self.app.notebook.nametowidget(tab_id)
+                if hasattr(tab_frame, 'sql_tab') and tab_frame.sql_tab is not self:
+                    if getattr(tab_frame, 'conn_name', None) == self.conn_name:
+                        tab_frame.sql_tab._refresh_log_tab()
+            except Exception:
+                pass
+
     def _create_pagination_controls(self, parent):
         """Create pagination controls above results."""
         self.paging_frame = ttk.Frame(parent)
@@ -455,6 +723,16 @@ class SQLTab:
         self.save_menu.add_command(label="JSON (.json)", command=self._save_to_json)
         self.save_btn = ttk.Menubutton(nav_frame, text="Save To", menu=self.save_menu)
         self.save_btn.pack(side=tk.LEFT, padx=(15, 0))
+
+        # Edit changes frame (initially hidden, shown when changes exist)
+        self.edit_changes_frame = ttk.Frame(nav_frame)
+        # Don't pack yet - will be shown when changes are made
+
+        ttk.Separator(self.edit_changes_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        self.save_changes_btn = ttk.Button(self.edit_changes_frame, text="Save Changes", command=self._save_changes)
+        self.save_changes_btn.pack(side=tk.LEFT, padx=2)
+        self.discard_changes_btn = ttk.Button(self.edit_changes_frame, text="Discard", command=self._discard_changes)
+        self.discard_changes_btn.pack(side=tk.LEFT, padx=2)
 
         self._results_search_matches = []
         self._results_search_index = -1
@@ -594,7 +872,45 @@ class SQLTab:
 
             self.app.root.after(0, self._display_page_results, rows, fetch_time)
         except Exception as e:
-            self.app.root.after(0, self._query_error, str(e), {})
+            error_msg = str(e)
+
+            # Check for PostgreSQL aborted transaction - rollback and retry to get real error
+            if "current transaction is aborted" in error_msg.lower():
+                try:
+                    self.connection.rollback()
+                    retry_cursor = self.connection.cursor()
+                    retry_cursor.execute(paginated_sql)
+                except Exception as retry_e:
+                    error_msg = str(retry_e)
+                finally:
+                    try:
+                        self.connection.rollback()
+                    except Exception:
+                        pass
+
+            # Check for connection errors - try to reconnect and retry
+            if self._is_connection_error(error_msg):
+                self.app.root.after(0, lambda: self.app.statusbar.config(text="Connection lost, reconnecting..."))
+                if self._try_reconnect():
+                    try:
+                        cursor = self.connection.cursor()
+                        cursor.execute(paginated_sql)
+                        rows = cursor.fetchall()
+                        cursor.close()
+                        self.app.root.after(0, self._display_page_results, rows, 0)
+                        return
+                    except Exception as retry_e:
+                        error_msg = f"Reconnected but query failed: {retry_e}"
+                else:
+                    error_msg = f"Connection lost and reconnect failed: {error_msg}"
+
+            # Rollback to clear failed transaction state
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+
+            self.app.root.after(0, self._query_error, error_msg, {})
         finally:
             self.app.root.after(0, self._set_running, False)
 
@@ -669,11 +985,13 @@ class SQLTab:
         self._running = running
         if running:
             self.run_btn.config(state=tk.DISABLED)
+            self.run_script_btn.config(state=tk.DISABLED)
             self.cancel_btn.config(state=tk.NORMAL)
             self.app.root.config(cursor="watch")
             self.app.statusbar.config(text=f"Running query on {self.conn_name}...")
         else:
             self.run_btn.config(state=tk.NORMAL)
+            self.run_script_btn.config(state=tk.NORMAL)
             self.cancel_btn.config(state=tk.DISABLED)
             self.app.root.config(cursor="")
 
@@ -686,11 +1004,66 @@ class SQLTab:
             except Exception:
                 pass
 
+    def _get_current_statement(self):
+        """Get the SQL statement at the current cursor position."""
+        full_text = self.sql_text.get("1.0", tk.END)
+        cursor_pos = self.sql_text.index(tk.INSERT)
+
+        # Convert cursor position to character offset
+        line, col = map(int, cursor_pos.split('.'))
+        lines = full_text.split('\n')
+        cursor_offset = sum(len(lines[i]) + 1 for i in range(line - 1)) + col
+
+        # Find statement boundaries using semicolons
+        # Track positions of each statement
+        statements = []
+        current_start = 0
+        in_string = False
+        string_char = None
+        i = 0
+
+        while i < len(full_text):
+            char = full_text[i]
+
+            # Handle string literals (don't split on semicolons inside strings)
+            if char in ("'", '"') and (i == 0 or full_text[i-1] != '\\'):
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif char == string_char:
+                    in_string = False
+                    string_char = None
+
+            # Found statement boundary
+            elif char == ';' and not in_string:
+                stmt_text = full_text[current_start:i].strip()
+                if stmt_text:
+                    statements.append((current_start, i + 1, stmt_text))
+                current_start = i + 1
+
+            i += 1
+
+        # Don't forget the last statement (may not end with semicolon)
+        remaining = full_text[current_start:].strip()
+        if remaining:
+            statements.append((current_start, len(full_text), remaining))
+
+        # Find which statement contains the cursor
+        for start, end, stmt in statements:
+            if start <= cursor_offset <= end:
+                return stmt
+
+        # If cursor is after all statements, return the last one
+        if statements:
+            return statements[-1][2]
+
+        return full_text.strip()
+
     def _run_query(self):
         if self._running:
             return
 
-        sql = self.sql_text.get("1.0", tk.END).strip()
+        sql = self._get_current_statement()
         if not sql:
             return
 
@@ -722,6 +1095,215 @@ class SQLTab:
         # Run query in thread
         thread = threading.Thread(target=self._execute_query, args=(sql,), daemon=True)
         thread.start()
+
+    def _run_script(self):
+        """Execute all statements in the SQL editor."""
+        if self._running:
+            return
+
+        full_text = self.sql_text.get("1.0", tk.END).strip()
+        if not full_text:
+            return
+
+        # Parse all statements
+        statements = self._parse_all_statements(full_text)
+        if not statements:
+            return
+
+        # Clear previous results
+        self._all_rows = []
+        self._columns = []
+        self._column_info = []
+        self._current_page = 0
+        self._base_sql = ""
+        self._total_rows = 0
+        self.results_tree.delete(*self.results_tree.get_children())
+
+        # Clear fields tab
+        self.fields_tree.delete(*self.fields_tree.get_children())
+
+        # Clear results label
+        self.page_label.config(text="")
+
+        # Clear statistics tab
+        self.stats_text.config(state=tk.NORMAL)
+        self.stats_text.delete("1.0", tk.END)
+        self.stats_text.insert("1.0", f"Executing {len(statements)} statement(s)...")
+        self.stats_text.config(state=tk.DISABLED)
+
+        self._set_running(True)
+
+        # Run all statements in thread
+        thread = threading.Thread(target=self._execute_script, args=(statements,), daemon=True)
+        thread.start()
+
+    def _parse_all_statements(self, text):
+        """Parse text into individual SQL statements."""
+        statements = []
+        current_start = 0
+        in_string = False
+        string_char = None
+        i = 0
+
+        while i < len(text):
+            char = text[i]
+
+            # Handle string literals
+            if char in ("'", '"') and (i == 0 or text[i-1] != '\\'):
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif char == string_char:
+                    in_string = False
+                    string_char = None
+
+            elif char == ';' and not in_string:
+                stmt_text = text[current_start:i].strip()
+                if stmt_text:
+                    statements.append(stmt_text)
+                current_start = i + 1
+
+            i += 1
+
+        # Last statement (may not end with semicolon)
+        remaining = text[current_start:].strip()
+        if remaining:
+            statements.append(remaining)
+
+        return statements
+
+    def _execute_script(self, statements):
+        """Execute multiple statements sequentially."""
+        import time
+        results = []
+        total_start = time.time()
+
+        for i, sql in enumerate(statements):
+            stmt_start = time.time()
+            try:
+                cursor = self.connection.cursor()
+                sql_stripped = sql.strip().rstrip(';')
+                cursor.execute(sql_stripped)
+
+                if cursor.description:
+                    # SELECT - fetch results
+                    rows = cursor.fetchall()
+                    duration = time.time() - stmt_start
+                    results.append({
+                        "stmt": i + 1,
+                        "sql": sql[:50] + "..." if len(sql) > 50 else sql,
+                        "full_sql": sql,
+                        "status": f"{len(rows)} row(s) returned",
+                        "time": duration,
+                        "row_count": len(rows),
+                        "success": True
+                    })
+                else:
+                    # DML - get rowcount and commit
+                    rowcount = cursor.rowcount if cursor.rowcount >= 0 else 0
+                    self.connection.commit()
+                    duration = time.time() - stmt_start
+                    sql_upper = sql_stripped.upper()
+                    stmt_type = sql_upper.split()[0] if sql_upper else "Statement"
+                    if stmt_type == "UPDATE":
+                        status = f"{rowcount} row(s) updated"
+                    elif stmt_type == "INSERT":
+                        status = f"{rowcount} row(s) inserted"
+                    elif stmt_type == "DELETE":
+                        status = f"{rowcount} row(s) deleted"
+                    else:
+                        status = f"{rowcount} row(s) affected"
+                    results.append({
+                        "stmt": i + 1,
+                        "sql": sql[:50] + "..." if len(sql) > 50 else sql,
+                        "full_sql": sql,
+                        "status": status,
+                        "time": duration,
+                        "row_count": rowcount,
+                        "success": True
+                    })
+                cursor.close()
+
+            except Exception as e:
+                error_msg = str(e)
+                duration = time.time() - stmt_start
+                # Try rollback
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+                results.append({
+                    "stmt": i + 1,
+                    "sql": sql[:50] + "..." if len(sql) > 50 else sql,
+                    "full_sql": sql,
+                    "status": f"ERROR: {error_msg}",
+                    "time": duration,
+                    "row_count": 0,
+                    "success": False,
+                    "error": error_msg
+                })
+
+        total_time = time.time() - total_start
+        self.app.root.after(0, self._display_script_results, results, total_time)
+
+    def _display_script_results(self, results, total_time):
+        """Display script execution results."""
+        self._set_running(False)
+
+        # Log each statement
+        for r in results:
+            status = "success" if r.get("success", True) else "error"
+            error_msg = r.get("error") if status == "error" else None
+            self.app.db.log_query(
+                self.conn_name,
+                r.get("full_sql", r["sql"]),
+                r.get("time", 0),
+                r.get("row_count", 0),
+                status,
+                error_msg
+            )
+        self._refresh_log_tab()
+        self._notify_log_change()
+
+        # Switch to Results tab
+        self.results_notebook.select(0)
+
+        # Setup columns for script results
+        self._columns = ["#", "SQL", "Result", "Time"]
+        self._all_rows = []
+        self._column_info = []
+
+        self.results_tree["columns"] = self._columns
+        self.results_tree.heading("#", text="#")
+        self.results_tree.heading("SQL", text="SQL")
+        self.results_tree.heading("Result", text="Result")
+        self.results_tree.heading("Time", text="Time")
+
+        self.results_tree.column("#", width=40, minwidth=30, stretch=False)
+        self.results_tree.column("SQL", width=300, minwidth=100, stretch=True)
+        self.results_tree.column("Result", width=200, minwidth=100, stretch=True)
+        self.results_tree.column("Time", width=80, minwidth=60, stretch=False)
+
+        for r in results:
+            row = (r["stmt"], r["sql"], r["status"], f"{r['time']:.3f}s")
+            self._all_rows.append(row)
+            self.results_tree.insert("", tk.END, values=row)
+
+        self._update_pagination_ui(0, 0, 0)
+
+        # Update statistics
+        success_count = sum(1 for r in results if r.get("success", True))
+        error_count = len(results) - success_count
+        stats = f"Script completed: {len(results)} statement(s)\n"
+        stats += f"Success: {success_count}, Errors: {error_count}\n"
+        stats += f"Total time: {total_time:.3f}s"
+
+        self.stats_text.config(state=tk.NORMAL)
+        self.stats_text.delete("1.0", tk.END)
+        self.stats_text.insert("1.0", stats)
+        self.stats_text.config(state=tk.DISABLED)
+
+        self.app.statusbar.config(text=f"Script completed: {len(results)} statement(s) in {total_time:.3f}s on {self.conn_name}")
 
     def _add_row_limit(self, sql):
         """Add row limit to SELECT statements if not already limited."""
@@ -836,14 +1418,79 @@ class SQLTab:
                 # Update UI in main thread
                 self.app.root.after(0, self._display_results, columns, rows, column_info, stats_info)
             else:
+                # Non-SELECT statement - get affected row count
+                rowcount = self._cursor.rowcount if self._cursor.rowcount >= 0 else 0
                 self.connection.commit()
                 stats_info["exec_time"] = time.time() - start_time
-                self.app.root.after(0, self._query_done, "Statement executed successfully", stats_info)
+                stats_info["rowcount"] = rowcount
+                # Determine statement type for message
+                stmt_type = sql_upper.split()[0] if sql_upper else "Statement"
+                if stmt_type == "UPDATE":
+                    message = f"{rowcount} row(s) updated"
+                elif stmt_type == "INSERT":
+                    message = f"{rowcount} row(s) inserted"
+                elif stmt_type == "DELETE":
+                    message = f"{rowcount} row(s) deleted"
+                else:
+                    message = f"Statement executed ({rowcount} row(s) affected)"
+                self.app.root.after(0, self._query_done, message, stats_info)
 
             self._cursor.close()
         except Exception as e:
-            stats_info["error"] = str(e)
-            self.app.root.after(0, self._query_error, str(e), stats_info)
+            error_msg = str(e)
+
+            # Check for PostgreSQL aborted transaction - rollback and retry to get real error
+            if "current transaction is aborted" in error_msg.lower():
+                try:
+                    self.connection.rollback()
+                    retry_cursor = self.connection.cursor()
+                    retry_cursor.execute(sql.strip().rstrip(';'))
+                except Exception as retry_e:
+                    error_msg = str(retry_e)
+                finally:
+                    try:
+                        self.connection.rollback()
+                    except Exception:
+                        pass
+
+            # Check for connection errors - try to reconnect and retry
+            if self._is_connection_error(error_msg):
+                self.app.root.after(0, lambda: self.app.statusbar.config(text="Connection lost, reconnecting..."))
+                if self._try_reconnect():
+                    # Retry the query with new connection
+                    try:
+                        self._cursor = self.connection.cursor()
+                        self._cursor.execute(sql.strip().rstrip(';'))
+                        # If successful, process results
+                        if self._cursor.description:
+                            columns = [desc[0] for desc in self._cursor.description]
+                            column_info = list(self._cursor.description)
+                            rows = self._cursor.fetchall()
+                            stats_info["row_count"] = len(rows)
+                            stats_info["column_count"] = len(columns)
+                            self._cursor.close()
+                            self.app.root.after(0, self._display_results, columns, rows, column_info, stats_info)
+                            return
+                        else:
+                            rowcount = self._cursor.rowcount if self._cursor.rowcount >= 0 else 0
+                            self.connection.commit()
+                            self._cursor.close()
+                            message = f"{rowcount} row(s) affected (reconnected)"
+                            self.app.root.after(0, self._query_done, message, stats_info)
+                            return
+                    except Exception as retry_e:
+                        error_msg = f"Reconnected but query failed: {retry_e}"
+                else:
+                    error_msg = f"Connection lost and reconnect failed: {error_msg}"
+
+            # Rollback to clear failed transaction state
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+
+            stats_info["error"] = error_msg
+            self.app.root.after(0, self._query_error, error_msg, stats_info)
         finally:
             self._cursor = None
             self.app.root.after(0, self._set_running, False)
@@ -1039,11 +1686,56 @@ class SQLTab:
 
     def _display_results(self, columns, rows, column_info, stats_info):
         """Display results in the treeview (called from main thread)."""
+        # Log the query
+        sql = stats_info.get('sql', '')
+        duration = stats_info.get('exec_time', 0) + stats_info.get('fetch_time', 0)
+        row_count = stats_info.get('row_count', len(rows))
+        self.app.db.log_query(self.conn_name, sql, duration, row_count, "success")
+        self._refresh_log_tab()
+        self._notify_log_change()
+
+        # Switch to Results tab
+        self.results_notebook.select(0)
+
         # Store all results
         self._columns = columns
         self._all_rows = list(rows)
         self._column_info = column_info
         self._current_page = 0
+
+        # Reset editing state
+        self._editable = False
+        self._edit_table = None
+        self._edit_schema = None
+        self._pk_columns = []
+        self._pk_indices = []
+        self._original_values = {}
+        self._modified_cells = {}
+
+        # Check if results are editable (single-table SELECT with PK)
+        sql = stats_info.get('sql', '')
+        schema, table = self._parse_single_table_select(sql)
+        if table:
+            pk_cols = self.adapter.get_primary_key_columns(self.connection, schema, table)
+            if pk_cols:
+                # Check if all PK columns are in the result set
+                columns_upper = [c.upper() for c in columns]
+                pk_indices = []
+                all_pk_found = True
+                for pk_col in pk_cols:
+                    try:
+                        idx = columns_upper.index(pk_col.upper())
+                        pk_indices.append(idx)
+                    except ValueError:
+                        all_pk_found = False
+                        break
+
+                if all_pk_found:
+                    self._editable = True
+                    self._edit_table = table
+                    self._edit_schema = schema
+                    self._pk_columns = pk_cols
+                    self._pk_indices = pk_indices
 
         # Setup columns in results tree
         self._sort_column = None
@@ -1052,7 +1744,9 @@ class SQLTab:
         scale = self.app.font_size / 10.0
         self.results_tree["columns"] = columns
         for i, col in enumerate(columns):
-            self.results_tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c))
+            # Add pencil/lock indicator to column header if editing is enabled
+            header_text = col
+            self.results_tree.heading(col, text=header_text, command=lambda c=col: self._sort_by_column(c))
             col_info = column_info[i] if i < len(column_info) else None
             width = self._calculate_column_width(col, col_info)
             # Store base width (unscaled) for later rescaling
@@ -1069,7 +1763,12 @@ class SQLTab:
         # Update statistics tab
         self._update_statistics_tab(stats_info)
 
-        self.app.statusbar.config(text=f"{len(rows):,} row(s) returned from {self.conn_name}")
+        # Update status with edit indicator
+        edit_status = " [Editable]" if self._editable else ""
+        self.app.statusbar.config(text=f"{len(rows):,} row(s) returned from {self.conn_name}{edit_status}")
+
+        # Update save button state
+        self._update_save_button()
 
     def _update_fields_tab(self, column_info):
         """Update the Fields tab with column metadata."""
@@ -1197,8 +1896,33 @@ class SQLTab:
 
     def _query_done(self, message, stats_info=None):
         """Called when non-SELECT query completes."""
-        self._all_rows = []
-        self._columns = []
+        # Log the query
+        if stats_info:
+            sql = stats_info.get('sql', '')
+            duration = stats_info.get('exec_time', 0)
+            row_count = stats_info.get('rowcount', 0)
+            self.app.db.log_query(self.conn_name, sql, duration, row_count, "success")
+            self._refresh_log_tab()
+            self._notify_log_change()
+
+        # Switch to Results tab
+        self.results_notebook.select(0)
+
+        # Display result in the results pane
+        self._columns = ["Result"]
+        self._all_rows = [(message,)]
+        self._column_info = []
+        self._current_page = 0
+        self._sort_column = None
+        self._sort_reverse = False
+
+        # Setup single column in results tree
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.results_tree["columns"] = ["Result"]
+        self.results_tree.heading("Result", text="Result")
+        self.results_tree.column("Result", width=400, minwidth=100, stretch=True)
+        self.results_tree.insert("", tk.END, values=(message,))
+
         self._update_pagination_ui(0, 0, 0)
 
         if stats_info:
@@ -1208,6 +1932,33 @@ class SQLTab:
 
     def _query_error(self, error, stats_info=None):
         """Called when query fails."""
+        # Log the query error
+        if stats_info:
+            sql = stats_info.get('sql', '')
+            duration = stats_info.get('exec_time', 0) if 'exec_time' in stats_info else 0
+            self.app.db.log_query(self.conn_name, sql, duration, 0, "error", error)
+            self._refresh_log_tab()
+            self._notify_log_change()
+
+        # Switch to Results tab
+        self.results_notebook.select(0)
+
+        # Display error in the results pane
+        self._columns = ["Error"]
+        self._all_rows = [(error,)]
+        self._column_info = []
+        self._current_page = 0
+        self._sort_column = None
+        self._sort_reverse = False
+
+        # Setup error display in results tree
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.results_tree["columns"] = ["Error"]
+        self.results_tree.heading("Error", text="Error")
+        self.results_tree.column("Error", width=600, minwidth=100, stretch=True)
+        self.results_tree.insert("", tk.END, values=(error,))
+
+        # Also update statistics tab
         if stats_info:
             stats_info['error'] = error
             self.stats_text.config(state=tk.NORMAL)
@@ -1215,7 +1966,8 @@ class SQLTab:
             self.stats_text.insert("1.0", f"ERROR:\n{error}\n\nQuery:\n{stats_info.get('sql', '')}")
             self.stats_text.config(state=tk.DISABLED)
 
-        messagebox.showerror("SQL Error", error)
+        self._update_pagination_ui(0, 0, 0)
+        self.app.statusbar.config(text=f"Error on {self.conn_name}")
 
     def _save_query(self):
         sql = self.sql_text.get("1.0", tk.END).strip()
@@ -1592,7 +2344,7 @@ class SQLTab:
                     pass
 
     def _on_results_double_click(self, event):
-        """Handle double-click on results treeview - autosize column or open record viewer."""
+        """Handle double-click on results treeview - autosize column, edit cell, or open record viewer."""
         region = self.results_tree.identify_region(event.x, event.y)
 
         if region == "separator":
@@ -1608,8 +2360,11 @@ class SQLTab:
                         self._autosize_column(col_name)
             return "break"  # Prevent other handlers
         elif region == "cell":
-            # Double-click on data cell - open record viewer
-            self._open_record_viewer(event)
+            # Double-click on data cell - edit if editable, otherwise open record viewer
+            if self._editable:
+                self._start_cell_edit(event)
+            else:
+                self._open_record_viewer(event)
 
     def _autosize_column(self, col_name):
         """Auto-size a column to fit the maximum content width."""
@@ -2017,6 +2772,16 @@ class SQLTab:
             self.sql_context_menu.configure(bg=menu_bg, fg=menu_fg,
                                            activebackground=select_bg, activeforeground=menu_fg)
 
+        # Update log context menu
+        if hasattr(self, 'log_context_menu'):
+            self.log_context_menu.configure(bg=menu_bg, fg=menu_fg,
+                                           activebackground=select_bg, activeforeground=menu_fg)
+
+        # Update log tree error tag color
+        if hasattr(self, 'log_tree'):
+            error_color = "#ff6b6b" if is_dark else "#cc0000"
+            self.log_tree.tag_configure("error", foreground=error_color)
+
         # Update search highlight tags
         self.sql_text.tag_configure("search_highlight", background=search_highlight, foreground=highlight_fg)
         self.sql_text.tag_configure("search_current", background=search_current, foreground=highlight_fg)
@@ -2024,6 +2789,290 @@ class SQLTab:
         # Update syntax highlighting for theme
         self._setup_syntax_highlighting()
         self._highlight_sql()
+
+    # --- Inline Editing Methods ---
+
+    def _start_cell_edit(self, event):
+        """Start editing a cell in the results treeview."""
+        if not self._editable:
+            return
+
+        # Cancel any existing edit
+        self._cancel_cell_edit()
+
+        # Get the item and column
+        item_id = self.results_tree.identify_row(event.y)
+        col_id = self.results_tree.identify_column(event.x)
+
+        if not item_id or not col_id:
+            return
+
+        # Get column index (col_id is like "#1", "#2", etc.)
+        col_num = int(col_id.replace("#", "")) - 1
+        if col_num < 0 or col_num >= len(self._columns):
+            return
+
+        col_name = self._columns[col_num]
+
+        # Don't allow editing PK columns (for safety)
+        if col_num in self._pk_indices:
+            self.app.statusbar.config(text=f"Cannot edit primary key column '{col_name}'")
+            return
+
+        # Get the cell bbox
+        bbox = self.results_tree.bbox(item_id, col_id)
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        # Get current value
+        values = self.results_tree.item(item_id, 'values')
+        if col_num >= len(values):
+            return
+        current_value = values[col_num]
+
+        # Store original values if not already stored
+        if item_id not in self._original_values:
+            self._original_values[item_id] = tuple(values)
+
+        # Create entry widget for editing
+        self._edit_entry = tk.Entry(self.results_tree, font=("Courier", self.app.font_size))
+        self._edit_entry.place(x=x, y=y, width=width, height=height)
+        self._edit_entry.insert(0, str(current_value) if current_value is not None else "")
+        self._edit_entry.select_range(0, tk.END)
+        self._edit_entry.focus_set()
+
+        # Store editing context
+        self._edit_item_id = item_id
+        self._edit_col_num = col_num
+
+        # Bind keys
+        self._edit_entry.bind("<Return>", lambda e: self._commit_cell_edit())
+        self._edit_entry.bind("<Escape>", lambda e: self._cancel_cell_edit())
+        self._edit_entry.bind("<Tab>", lambda e: self._commit_and_next())
+        self._edit_entry.bind("<FocusOut>", lambda e: self._commit_cell_edit())
+
+    def _commit_cell_edit(self):
+        """Commit the current cell edit."""
+        if not self._edit_entry:
+            return
+
+        new_value = self._edit_entry.get()
+        item_id = self._edit_item_id
+        col_num = self._edit_col_num
+
+        # Get current values
+        values = list(self.results_tree.item(item_id, 'values'))
+        old_value = values[col_num]
+
+        # Check if value changed
+        if str(new_value) != str(old_value):
+            # Update the treeview
+            values[col_num] = new_value
+            self.results_tree.item(item_id, values=values)
+
+            # Track the modification
+            if item_id not in self._modified_cells:
+                self._modified_cells[item_id] = {}
+            self._modified_cells[item_id][col_num] = new_value
+
+            # Highlight modified row
+            self.results_tree.tag_configure("modified", background="#fffacd")
+            current_tags = list(self.results_tree.item(item_id, 'tags'))
+            if "modified" not in current_tags:
+                current_tags.append("modified")
+                self.results_tree.item(item_id, tags=current_tags)
+
+            # Update button states
+            self._update_save_button()
+
+        # Destroy the entry widget
+        self._edit_entry.destroy()
+        self._edit_entry = None
+        self._edit_item_id = None
+        self._edit_col_num = None
+
+    def _commit_and_next(self):
+        """Commit edit and move to next cell."""
+        item_id = self._edit_item_id
+        col_num = self._edit_col_num
+
+        self._commit_cell_edit()
+
+        # Move to next editable column
+        if item_id and col_num is not None:
+            next_col = col_num + 1
+            while next_col < len(self._columns):
+                if next_col not in self._pk_indices:
+                    # Simulate double-click on next cell
+                    bbox = self.results_tree.bbox(item_id, f"#{next_col + 1}")
+                    if bbox:
+                        x, y, w, h = bbox
+                        # Create fake event
+                        class FakeEvent:
+                            pass
+                        event = FakeEvent()
+                        event.x = x + w // 2
+                        event.y = y + h // 2
+                        self._start_cell_edit(event)
+                        return "break"
+                next_col += 1
+
+        return "break"
+
+    def _cancel_cell_edit(self):
+        """Cancel the current cell edit."""
+        if self._edit_entry:
+            self._edit_entry.destroy()
+            self._edit_entry = None
+            self._edit_item_id = None
+            self._edit_col_num = None
+
+    def _update_save_button(self):
+        """Show/hide Save Changes buttons based on modifications."""
+        has_changes = bool(self._modified_cells)
+        if has_changes:
+            # Show the edit changes frame
+            if not self.edit_changes_frame.winfo_ismapped():
+                self.edit_changes_frame.pack(side=tk.LEFT, padx=(10, 0))
+        else:
+            # Hide the edit changes frame
+            self.edit_changes_frame.pack_forget()
+
+    def _save_changes(self):
+        """Save all modified rows to the database."""
+        if not self._modified_cells:
+            return
+
+        if not self._editable or not self._edit_table:
+            messagebox.showerror("Error", "Results are not editable")
+            return
+
+        # Confirm save
+        num_changes = len(self._modified_cells)
+        if not messagebox.askyesno("Save Changes",
+                                   f"Save {num_changes} modified row(s) to '{self._edit_table}'?"):
+            return
+
+        errors = []
+        success_count = 0
+
+        for item_id, changes in self._modified_cells.items():
+            original = self._original_values.get(item_id)
+            if not original:
+                continue
+
+            try:
+                # Build UPDATE statement
+                sql, params = self._generate_update_sql(item_id, changes, original)
+                if sql:
+                    cursor = self.connection.cursor()
+                    cursor.execute(sql, params)
+                    self.connection.commit()
+                    cursor.close()
+                    success_count += 1
+
+                    # Update original values to reflect saved state
+                    current_values = self.results_tree.item(item_id, 'values')
+                    self._original_values[item_id] = tuple(current_values)
+
+                    # Remove modified tag
+                    current_tags = list(self.results_tree.item(item_id, 'tags'))
+                    if "modified" in current_tags:
+                        current_tags.remove("modified")
+                        self.results_tree.item(item_id, tags=current_tags)
+
+            except Exception as e:
+                errors.append(f"Row update failed: {e}")
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+
+        # Clear modified cells for successful saves
+        if success_count > 0:
+            # Keep only the ones that failed
+            saved_items = [iid for iid in self._modified_cells.keys()
+                          if iid not in [e for e in errors]]
+            self._modified_cells = {k: v for k, v in self._modified_cells.items()
+                                   if k not in saved_items}
+
+        # Clear all if all successful
+        if not errors:
+            self._modified_cells = {}
+
+        # Update button state
+        self._update_save_button()
+
+        # Show result
+        if errors:
+            messagebox.showerror("Save Errors",
+                               f"Saved {success_count} row(s).\n\nErrors:\n" + "\n".join(errors[:5]))
+        else:
+            self.app.statusbar.config(text=f"Saved {success_count} row(s) to {self._edit_table}")
+
+    def _discard_changes(self):
+        """Discard all unsaved changes."""
+        if not self._modified_cells:
+            return
+
+        if not messagebox.askyesno("Discard Changes",
+                                   f"Discard {len(self._modified_cells)} modified row(s)?"):
+            return
+
+        # Restore original values
+        for item_id in self._modified_cells:
+            original = self._original_values.get(item_id)
+            if original:
+                self.results_tree.item(item_id, values=original)
+
+            # Remove modified tag
+            current_tags = list(self.results_tree.item(item_id, 'tags'))
+            if "modified" in current_tags:
+                current_tags.remove("modified")
+                self.results_tree.item(item_id, tags=current_tags)
+
+        # Clear state
+        self._modified_cells = {}
+        self._update_save_button()
+        self.app.statusbar.config(text="Changes discarded")
+
+    def _generate_update_sql(self, item_id, changes, original_values):
+        """Generate UPDATE SQL for a modified row."""
+        if not changes or not original_values:
+            return None, None
+
+        # Build SET clause
+        set_parts = []
+        set_params = []
+        for col_num, new_value in changes.items():
+            col_name = self._columns[col_num]
+            set_parts.append(f"{col_name} = ?")
+            # Handle NULL
+            if new_value == "" or new_value is None:
+                set_params.append(None)
+            else:
+                set_params.append(new_value)
+
+        # Build WHERE clause using PK
+        where_parts = []
+        where_params = []
+        for pk_idx in self._pk_indices:
+            pk_col = self._columns[pk_idx]
+            pk_value = original_values[pk_idx]
+            where_parts.append(f"{pk_col} = ?")
+            where_params.append(pk_value)
+
+        # Build full SQL
+        table_ref = f"{self._edit_schema}.{self._edit_table}" if self._edit_schema else self._edit_table
+        sql = f"UPDATE {table_ref} SET {', '.join(set_parts)} WHERE {' AND '.join(where_parts)}"
+
+        # Adjust parameter style based on adapter
+        if self.adapter.db_type in ('mysql', 'postgresql'):
+            sql = sql.replace('?', '%s')
+
+        return sql, set_params + where_params
 
 
 class RecordViewerDialog:
