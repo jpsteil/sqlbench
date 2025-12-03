@@ -1301,7 +1301,12 @@ class SQLBenchApp:
             style.configure("TNotebook", background=bg, foreground=fg)
             style.configure("TNotebook.Tab", background=bg_light, foreground=fg, padding=[8, 2])
             style.configure("TPanedwindow", background=bg)
-            style.configure("TScrollbar", background=bg_light, troughcolor=bg_dark)
+            style.configure("Sash", sashthickness=6, gripcount=0)
+            style.configure("TScrollbar", background="#5a5a5a", troughcolor=bg, arrowcolor="#6e6e6e",
+                           bordercolor=bg, lightcolor="#5a5a5a", darkcolor="#5a5a5a")
+            style.map("TScrollbar", background=[("pressed", "#6e6e6e"), ("active", "#6e6e6e")],
+                      lightcolor=[("pressed", "#6e6e6e"), ("active", "#6e6e6e")],
+                      darkcolor=[("pressed", "#6e6e6e"), ("active", "#6e6e6e")])
             style.configure("Treeview", background=bg_light, foreground=fg, fieldbackground=bg_light)
             style.configure("Treeview.Heading", background=bg, foreground=fg)
             style.configure("TCheckbutton", background=bg, foreground=fg)
