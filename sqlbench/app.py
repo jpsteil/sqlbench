@@ -41,8 +41,14 @@ class SQLBenchApp:
         self._apply_theme()
         self._apply_font_size()
 
+        # Re-attach menu after theme (workaround for intermittent menu issue)
+        self.root.config(menu=self.menubar)
+
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Check window visibility after UI is set up
+        self.root.after(50, self._ensure_visible_on_screen)
 
         # Restore last connection and tabs after UI is ready
         self.root.after(100, self._restore_session)
@@ -83,12 +89,12 @@ class SQLBenchApp:
                 pass
 
     def _create_menu(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
+        self.menubar = tk.Menu(self.root)
+        self.root.config(menu=self.menubar)
 
         # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="File", menu=file_menu)
 
         self.dark_mode_var = tk.BooleanVar(value=self.db.get_setting("dark_mode", "0") == "1")
         file_menu.add_checkbutton(label="Dark Mode", variable=self.dark_mode_var,
@@ -103,8 +109,8 @@ class SQLBenchApp:
         self.font_size = int(self.db.get_setting("font_size", "10"))
 
         # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self._show_about)
 
     def _create_main_layout(self):
@@ -166,6 +172,12 @@ class SQLBenchApp:
         self.conn_tree.bind("<Button-3>", self._show_conn_menu)
         self.conn_tree.bind("<Double-1>", self._on_tree_double_click)
         self.conn_tree.bind("<<TreeviewOpen>>", self._on_tree_expand)
+
+        # Keyboard navigation for connection tree
+        self.conn_tree.bind("<Right>", self._on_tree_right_arrow)
+        self.conn_tree.bind("<Left>", self._on_tree_left_arrow)
+        self.conn_tree.bind("<space>", self._on_tree_space)
+        self.conn_tree.bind("<Return>", self._on_tree_space)
 
         # Dismiss menu when clicking elsewhere
         self.root.bind("<Button-1>", self._dismiss_menus)
@@ -291,6 +303,87 @@ class SQLBenchApp:
         item = self.conn_tree.focus()
         if item:
             self._handle_node_expand(item)
+
+    def _on_tree_right_arrow(self, event):
+        """Handle right arrow: expand if closed, move to first child if open."""
+        item = self.conn_tree.focus()
+        if not item:
+            return
+
+        # Skip placeholder nodes
+        if "::loading" in item or "::error" in item or "::field_" in item:
+            return
+
+        is_open = self.conn_tree.item(item, "open")
+        children = self.conn_tree.get_children(item)
+
+        if not is_open and children:
+            # Node is closed and has children - expand it
+            self.conn_tree.item(item, open=True)
+            self._handle_node_expand(item)
+        elif is_open and children:
+            # Node is open - move to first child
+            first_child = children[0]
+            # Skip loading/error placeholders
+            if "::loading" not in first_child and "::error" not in first_child:
+                self.conn_tree.focus(first_child)
+                self.conn_tree.selection_set(first_child)
+        elif not children:
+            # No children - for unconnected connections, try to connect
+            if "::" not in item and item not in self.connections:
+                self._connect_selected()
+
+        return "break"
+
+    def _on_tree_left_arrow(self, event):
+        """Handle left arrow: collapse if open, move to parent if closed."""
+        item = self.conn_tree.focus()
+        if not item:
+            return
+
+        # Skip placeholder nodes
+        if "::loading" in item or "::error" in item or "::field_" in item:
+            return
+
+        is_open = self.conn_tree.item(item, "open")
+
+        if is_open:
+            # Node is open - collapse it
+            self.conn_tree.item(item, open=False)
+        else:
+            # Node is closed - move to parent
+            parent = self.conn_tree.parent(item)
+            if parent:
+                self.conn_tree.focus(parent)
+                self.conn_tree.selection_set(parent)
+
+        return "break"
+
+    def _on_tree_space(self, event):
+        """Handle space/enter: toggle expand/collapse."""
+        item = self.conn_tree.focus()
+        if not item:
+            return
+
+        # Skip placeholder nodes
+        if "::loading" in item or "::error" in item or "::field_" in item:
+            return "break"
+
+        is_open = self.conn_tree.item(item, "open")
+        children = self.conn_tree.get_children(item)
+
+        if children:
+            # Toggle open/closed
+            if is_open:
+                self.conn_tree.item(item, open=False)
+            else:
+                self.conn_tree.item(item, open=True)
+                self._handle_node_expand(item)
+        elif "::" not in item and item not in self.connections:
+            # Unconnected connection node with no children - connect
+            self._connect_selected()
+
+        return "break"
 
     def _load_tables_for_connection(self, conn_name):
         """Load tables for a connection."""
@@ -1298,8 +1391,9 @@ class SQLBenchApp:
             style.configure("TButton", background=bg_light, foreground=fg)
             style.configure("TEntry", fieldbackground=bg_light, foreground=fg, insertcolor=fg)
             style.configure("TCombobox", fieldbackground=bg_light, foreground=fg)
-            style.configure("TNotebook", background=bg, foreground=fg)
-            style.configure("TNotebook.Tab", background=bg_light, foreground=fg, padding=[8, 2])
+            style.configure("TNotebook", background=bg, foreground=fg, tabmargins=[2, 5, 2, 0])
+            style.configure("TNotebook.Tab", background="#3c3f41", foreground="#777777", padding=[10, 4],
+                           borderwidth=1, focusthickness=0)
             style.configure("TPanedwindow", background=bg)
             style.configure("Sash", sashthickness=6, gripcount=0)
             style.configure("TScrollbar", background="#5a5a5a", troughcolor=bg, arrowcolor="#6e6e6e",
@@ -1314,7 +1408,9 @@ class SQLBenchApp:
             style.configure("TMenubutton", background=bg_light, foreground=fg)
 
             style.map("TButton", background=[("active", bg_light)])
-            style.map("TNotebook.Tab", background=[("selected", bg), ("active", bg_light)])
+            style.map("TNotebook.Tab", background=[("selected", bg_light), ("active", "#454545")],
+                      foreground=[("selected", fg)],
+                      padding=[("selected", [10, 4]), ("!selected", [10, 2])])
             style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", fg)])
             style.map("TCombobox", fieldbackground=[("readonly", bg_light)])
             style.map("TCheckbutton", background=[("active", bg)])
@@ -1341,10 +1437,17 @@ class SQLBenchApp:
             style.configure("TButton", background="#e1e1e1", foreground=fg)
             style.configure("TEntry", fieldbackground=bg_light, foreground=fg, insertcolor=fg)
             style.configure("TCombobox", fieldbackground=bg_light, foreground=fg)
-            style.configure("TNotebook", background=bg, foreground=fg)
-            style.configure("TNotebook.Tab", background="#c3c3c3", foreground=fg, padding=[8, 2])
+            style.configure("TNotebook", background=bg, foreground=fg, tabmargins=[2, 5, 2, 0])
+            style.configure("TNotebook.Tab", background="#d0d0d0", foreground="#666666", padding=[10, 4],
+                           borderwidth=1, focusthickness=0)
             style.configure("TPanedwindow", background=bg)
-            style.configure("TScrollbar", background="#c3c3c3", troughcolor=bg)
+            # Reset scrollbar to default light theme colors
+            style.configure("TScrollbar", background="#c3c3c3", troughcolor="#e6e6e6",
+                           arrowcolor="#5a5a5a", bordercolor=border,
+                           lightcolor="#ededed", darkcolor="#cfcfcf")
+            style.map("TScrollbar", background=[("pressed", "#a0a0a0"), ("active", "#b0b0b0")],
+                      lightcolor=[("pressed", "#a0a0a0"), ("active", "#b0b0b0")],
+                      darkcolor=[("pressed", "#a0a0a0"), ("active", "#b0b0b0")])
             style.configure("Treeview", background=bg_light, foreground=fg, fieldbackground=bg_light)
             style.configure("Treeview.Heading", background=bg, foreground=fg)
             style.configure("TCheckbutton", background=bg, foreground=fg)
@@ -1352,7 +1455,9 @@ class SQLBenchApp:
             style.configure("TMenubutton", background="#e1e1e1", foreground=fg)
 
             style.map("TButton", background=[("active", "#ececec")])
-            style.map("TNotebook.Tab", background=[("selected", bg)])
+            style.map("TNotebook.Tab", background=[("selected", "#ffffff"), ("active", "#e0e0e0")],
+                      foreground=[("selected", "#000000")],
+                      padding=[("selected", [10, 4]), ("!selected", [10, 2])])
             style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", "#ffffff")])
             style.map("TCombobox", fieldbackground=[("readonly", bg_light)])
             style.map("TCheckbutton", background=[("active", bg)])
@@ -1365,6 +1470,10 @@ class SQLBenchApp:
 
         # Apply to tab-specific components
         self._apply_theme_to_tabs()
+
+        # Re-apply menu to ensure it's visible after theme change
+        if hasattr(self, 'menubar'):
+            self.root.config(menu=self.menubar)
 
     def _apply_theme_to_widgets(self):
         """Apply theme to non-ttk widgets (Text, Listbox, Menu)."""
@@ -1463,13 +1572,18 @@ class SQLBenchApp:
 
         try:
             self.root.geometry(saved)
-            self.root.update_idletasks()
+        except Exception:
+            self.root.geometry(default_geometry)
 
+    def _ensure_visible_on_screen(self):
+        """Ensure window is visible on screen, reposition if needed."""
+        default_geometry = "1200x800"
+        try:
             if not self._is_visible_on_screen():
                 self.root.geometry(default_geometry)
                 self._center_window()
         except Exception:
-            self.root.geometry(default_geometry)
+            pass
 
     def _is_visible_on_screen(self):
         """Check if at least part of the window is visible on screen."""
