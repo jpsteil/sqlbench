@@ -180,8 +180,44 @@ class IBMiAdapter(DBAdapter):
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
 
+    def _is_file_journaled(self, conn, schema, table):
+        """Check if an IBM i file is journaled (required for SQL updates)."""
+        try:
+            cursor = conn.cursor()
+            sql = """
+                SELECT JOURNALED
+                FROM TABLE(QSYS2.OBJECT_STATISTICS(
+                    OBJECT_SCHEMA => ?,
+                    OBJTYPELIST => '*FILE',
+                    OBJECT_NAME => ?
+                ))
+            """
+            cursor.execute(sql, [schema.upper() if schema else '*LIBL', table.upper()])
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return row[0] == 'Y'
+        except Exception:
+            pass
+        return False
+
     def get_primary_key_columns(self, conn, schema, table):
-        """Get primary key columns for IBM i table."""
+        """Get primary key columns for IBM i table.
+
+        Tries in order:
+        1. Formal PRIMARY KEY constraint (SQL-created tables)
+        2. Unique index from SYSINDEXES (SQL-created indexes)
+        3. DDS-defined key fields from QADBKFLD (traditional physical files)
+
+        Returns empty list if file is not journaled (can't be updated via SQL).
+        """
+        # Check if file is journaled - required for SQL updates on IBM i
+        if not self._is_file_journaled(conn, schema, table):
+            return []
+
+        columns = []
+
+        # First, try formal PRIMARY KEY constraint
         try:
             cursor = conn.cursor()
             sql = """
@@ -198,9 +234,76 @@ class IBMiAdapter(DBAdapter):
             cursor.execute(sql, params)
             columns = [row[0] for row in cursor.fetchall()]
             cursor.close()
-            return columns
+            if columns:
+                return columns
         except Exception:
-            return []
+            pass  # SYSKEYCST may not exist or have different schema on older systems
+
+        # Second: try unique index from SQL catalog
+        try:
+            cursor = conn.cursor()
+            sql = """
+                SELECT i.INDEX_NAME, k.COLUMN_NAME
+                FROM QSYS2.SYSKEYS k
+                JOIN QSYS2.SYSINDEXES i
+                    ON k.INDEX_NAME = i.INDEX_NAME
+                    AND k.INDEX_SCHEMA = i.INDEX_SCHEMA
+                WHERE i.TABLE_NAME = ?
+                  AND i.IS_UNIQUE = 'Y'
+            """
+            params = [table.upper()]
+            if schema:
+                sql += " AND i.TABLE_SCHEMA = ?"
+                params.append(schema.upper())
+            sql += " ORDER BY i.INDEX_NAME, k.ORDINAL_POSITION"
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+            cursor.close()
+            if rows:
+                first_index_name = rows[0][0]
+                return [row[1] for row in rows if row[0] == first_index_name]
+        except Exception:
+            pass  # SYSKEYS/SYSINDEXES may not exist on older systems
+
+        # Third: try DDS-defined key fields (traditional physical files)
+        try:
+            cursor = conn.cursor()
+            # Check if file has unique keyed access path
+            sql = """
+                SELECT ACCESS_PATH_TYPE
+                FROM QSYS2.SYSFILES
+                WHERE TABLE_NAME = ?
+            """
+            params = [table.upper()]
+            if schema:
+                sql += " AND TABLE_SCHEMA = ?"
+                params.append(schema.upper())
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row and row[0] == 'KEYED UNIQUE':
+                # Get key fields from QADBKFLD catalog
+                cursor = conn.cursor()
+                sql = """
+                    SELECT DBKFLD
+                    FROM QSYS.QADBKFLD
+                    WHERE DBKFIL = ?
+                """
+                params = [table.upper()]
+                if schema:
+                    sql += " AND DBKLIB = ?"
+                    params.append(schema.upper())
+                sql += " ORDER BY DBKPOS"
+                cursor.execute(sql, params)
+                # Strip whitespace - QADBKFLD uses fixed-width CHAR fields
+                columns = [row[0].strip() for row in cursor.fetchall()]
+                cursor.close()
+                return columns
+        except Exception:
+            pass
+
+        return []
 
 
 class MySQLAdapter(DBAdapter):
@@ -271,9 +374,15 @@ class MySQLAdapter(DBAdapter):
         """
 
     def get_primary_key_columns(self, conn, schema, table):
-        """Get primary key columns for MySQL table."""
+        """Get primary key columns for MySQL table.
+
+        First tries to find a formal PRIMARY KEY constraint.
+        Falls back to unique index columns if no PK constraint exists.
+        """
         try:
             cursor = conn.cursor()
+
+            # First, try formal PRIMARY KEY constraint
             sql = """
                 SELECT COLUMN_NAME
                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
@@ -287,8 +396,35 @@ class MySQLAdapter(DBAdapter):
             sql += " ORDER BY ORDINAL_POSITION"
             cursor.execute(sql, params)
             columns = [row[0] for row in cursor.fetchall()]
+
+            if columns:
+                cursor.close()
+                return columns
+
+            # Fallback: find first unique index
+            sql = """
+                SELECT INDEX_NAME, COLUMN_NAME
+                FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_NAME = %s
+                  AND NON_UNIQUE = 0
+                  AND INDEX_NAME != 'PRIMARY'
+            """
+            params = [table]
+            if schema:
+                sql += " AND TABLE_SCHEMA = %s"
+                params.append(schema)
+            sql += " ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
             cursor.close()
-            return columns
+
+            if rows:
+                # Take columns from the first unique index only
+                first_index_name = rows[0][0]
+                columns = [row[1] for row in rows if row[0] == first_index_name]
+                return columns
+
+            return []
         except Exception:
             return []
 
@@ -402,9 +538,15 @@ class PostgreSQLAdapter(DBAdapter):
         """
 
     def get_primary_key_columns(self, conn, schema, table):
-        """Get primary key columns for PostgreSQL table."""
+        """Get primary key columns for PostgreSQL table.
+
+        First tries to find a formal PRIMARY KEY constraint.
+        Falls back to unique index columns if no PK constraint exists.
+        """
         try:
             cursor = conn.cursor()
+
+            # First, try formal PRIMARY KEY constraint
             sql = """
                 SELECT kcu.column_name
                 FROM information_schema.table_constraints tc
@@ -423,9 +565,39 @@ class PostgreSQLAdapter(DBAdapter):
             sql += " ORDER BY kcu.ordinal_position"
             cursor.execute(sql, params)
             columns = [row[0] for row in cursor.fetchall()]
+
+            if columns:
+                cursor.close()
+                conn.rollback()  # Clear any transaction state
+                return columns
+
+            # Fallback: find first unique index
+            schema_name = schema if schema else 'public'
+            sql = """
+                SELECT i.relname AS index_name, a.attname AS column_name
+                FROM pg_index ix
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_class t ON t.oid = ix.indrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                WHERE t.relname = %s
+                  AND n.nspname = %s
+                  AND ix.indisunique = true
+                  AND ix.indisprimary = false
+                ORDER BY i.relname, array_position(ix.indkey, a.attnum)
+            """
+            cursor.execute(sql, [table, schema_name])
+            rows = cursor.fetchall()
             cursor.close()
             conn.rollback()  # Clear any transaction state
-            return columns
+
+            if rows:
+                # Take columns from the first unique index only
+                first_index_name = rows[0][0]
+                columns = [row[1] for row in rows if row[0] == first_index_name]
+                return columns
+
+            return []
         except Exception:
             try:
                 conn.rollback()
