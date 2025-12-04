@@ -37,7 +37,8 @@ class Database:
                             port INTEGER,
                             database TEXT,
                             user TEXT NOT NULL,
-                            password TEXT NOT NULL
+                            password TEXT NOT NULL,
+                            is_production INTEGER DEFAULT 0
                         )
                     """)
                     # Migrate data - existing connections become IBM i type
@@ -52,6 +53,9 @@ class Database:
                             SELECT name, 'ibmi', host, user, password FROM connections_old
                         """)
                     conn.execute("DROP TABLE connections_old")
+                # Add is_production column if missing
+                if 'is_production' not in columns:
+                    conn.execute("ALTER TABLE connections ADD COLUMN is_production INTEGER DEFAULT 0")
             else:
                 conn.execute("""
                     CREATE TABLE connections (
@@ -62,7 +66,8 @@ class Database:
                         port INTEGER,
                         database TEXT,
                         user TEXT NOT NULL,
-                        password TEXT NOT NULL
+                        password TEXT NOT NULL,
+                        is_production INTEGER DEFAULT 0
                     )
                 """)
             conn.execute("""
@@ -119,7 +124,7 @@ class Database:
         with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT id, name, db_type, host, port, database, user FROM connections ORDER BY name"
+                "SELECT id, name, db_type, host, port, database, user, is_production FROM connections ORDER BY name"
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -127,7 +132,7 @@ class Database:
         with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT id, name, db_type, host, port, database, user, password FROM connections WHERE name = ?",
+                "SELECT id, name, db_type, host, port, database, user, password, is_production FROM connections WHERE name = ?",
                 (name,)
             )
             row = cursor.fetchone()
@@ -137,27 +142,27 @@ class Database:
         with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT id, name, db_type, host, port, database, user, password FROM connections WHERE id = ?",
+                "SELECT id, name, db_type, host, port, database, user, password, is_production FROM connections WHERE id = ?",
                 (conn_id,)
             )
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def save_connection(self, name, db_type, host, port, database, user, password, conn_id=None):
+    def save_connection(self, name, db_type, host, port, database, user, password, conn_id=None, is_production=False):
         with self._get_conn() as conn:
             if conn_id:
                 # Update existing connection
                 conn.execute(
                     """UPDATE connections SET name = ?, db_type = ?, host = ?, port = ?,
-                       database = ?, user = ?, password = ? WHERE id = ?""",
-                    (name, db_type, host, port, database, user, password, conn_id)
+                       database = ?, user = ?, password = ?, is_production = ? WHERE id = ?""",
+                    (name, db_type, host, port, database, user, password, 1 if is_production else 0, conn_id)
                 )
             else:
                 # Insert new connection
                 conn.execute(
-                    """INSERT INTO connections (name, db_type, host, port, database, user, password)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (name, db_type, host, port, database, user, password)
+                    """INSERT INTO connections (name, db_type, host, port, database, user, password, is_production)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, db_type, host, port, database, user, password, 1 if is_production else 0)
                 )
             conn.commit()
 

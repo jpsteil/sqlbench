@@ -90,6 +90,61 @@ class SQLTab:
         except Exception:
             return False
 
+    def _is_production_connection(self):
+        """Check if the current connection is marked as production."""
+        conn_data = self.app.connections.get(self.conn_name)
+        if not conn_data:
+            return False
+        conn_info = conn_data.get("info")
+        if not conn_info:
+            return False
+        return bool(conn_info.get("is_production", 0))
+
+    def _is_destructive_sql(self, sql):
+        """Check if a SQL statement is destructive (modifies/deletes data or schema)."""
+        sql_upper = sql.strip().upper()
+        # Remove leading comments
+        while sql_upper.startswith('--') or sql_upper.startswith('/*'):
+            if sql_upper.startswith('--'):
+                newline = sql_upper.find('\n')
+                if newline == -1:
+                    return False
+                sql_upper = sql_upper[newline + 1:].strip().upper()
+            elif sql_upper.startswith('/*'):
+                end = sql_upper.find('*/')
+                if end == -1:
+                    return False
+                sql_upper = sql_upper[end + 2:].strip().upper()
+
+        destructive_keywords = (
+            'UPDATE ', 'DELETE ', 'DROP ', 'ALTER ', 'TRUNCATE ',
+            'INSERT ', 'REPLACE ', 'MERGE ', 'CALL ',
+        )
+        return any(sql_upper.startswith(kw) for kw in destructive_keywords)
+
+    def _confirm_destructive_query(self, sql):
+        """Show confirmation dialog for destructive SQL on production. Returns True to proceed."""
+        # Determine statement type for message
+        sql_upper = sql.strip().upper()
+        for kw in ('UPDATE', 'DELETE', 'DROP', 'ALTER', 'TRUNCATE', 'INSERT', 'REPLACE', 'MERGE', 'CALL'):
+            if sql_upper.startswith(kw):
+                stmt_type = kw
+                break
+        else:
+            stmt_type = "SQL"
+
+        # Truncate SQL for display
+        display_sql = sql[:100] + "..." if len(sql) > 100 else sql
+
+        return messagebox.askyesno(
+            "Production Database",
+            f"This is a PRODUCTION connection.\n\n"
+            f"You are about to execute a {stmt_type} statement:\n\n"
+            f"{display_sql}\n\n"
+            f"Are you sure you want to proceed?",
+            icon="warning"
+        )
+
     def _parse_single_table_select(self, sql):
         """
         Parse SQL to detect if it's a simple single-table SELECT.
@@ -1068,6 +1123,11 @@ class SQLTab:
         if not sql:
             return
 
+        # Check for destructive SQL on production connections
+        if self._is_production_connection() and self._is_destructive_sql(sql):
+            if not self._confirm_destructive_query(sql):
+                return
+
         # Clear previous results
         self._all_rows = []
         self._columns = []
@@ -1110,6 +1170,21 @@ class SQLTab:
         statements = self._parse_all_statements(full_text)
         if not statements:
             return
+
+        # Check for destructive SQL on production connections
+        if self._is_production_connection():
+            destructive_stmts = [s for s in statements if self._is_destructive_sql(s)]
+            if destructive_stmts:
+                if not messagebox.askyesno(
+                    "Production Database",
+                    f"This is a PRODUCTION connection.\n\n"
+                    f"Your script contains {len(destructive_stmts)} data-modifying statement(s):\n"
+                    f"{', '.join(s.split()[0].upper() for s in destructive_stmts[:5])}"
+                    f"{'...' if len(destructive_stmts) > 5 else ''}\n\n"
+                    f"Are you sure you want to proceed?",
+                    icon="warning"
+                ):
+                    return
 
         # Clear previous results
         self._all_rows = []
@@ -2950,11 +3025,20 @@ class SQLTab:
             messagebox.showerror("Error", "Results are not editable")
             return
 
-        # Confirm save
+        # Confirm save (with stronger warning for production)
         num_changes = len(self._modified_cells)
-        if not messagebox.askyesno("Save Changes",
-                                   f"Save {num_changes} modified row(s) to '{self._edit_table}'?"):
-            return
+        if self._is_production_connection():
+            if not messagebox.askyesno(
+                "Production Database",
+                f"This is a PRODUCTION connection.\n\n"
+                f"Save {num_changes} modified row(s) to '{self._edit_table}'?",
+                icon="warning"
+            ):
+                return
+        else:
+            if not messagebox.askyesno("Save Changes",
+                                       f"Save {num_changes} modified row(s) to '{self._edit_table}'?"):
+                return
 
         errors = []
         success_count = 0

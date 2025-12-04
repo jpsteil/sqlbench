@@ -177,6 +177,15 @@ class ConnectionDialog:
         self.pass_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
         row += 1
 
+        # Production checkbox
+        self.is_production_var = tk.BooleanVar(value=False)
+        self.production_check = ttk.Checkbutton(
+            detail_frame, text="Production (confirm before data changes)",
+            variable=self.is_production_var
+        )
+        self.production_check.grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+        row += 1
+
         # Test and Save buttons
         btn_frame = ttk.Frame(detail_frame)
         btn_frame.grid(row=row, column=0, columnspan=3, pady=20)
@@ -297,6 +306,8 @@ class ConnectionDialog:
         self.pass_entry.delete(0, tk.END)
         self.pass_entry.insert(0, conn["password"])
 
+        self.is_production_var.set(bool(conn.get("is_production", 0)))
+
     def _on_select(self, event):
         selection = self.conn_tree.selection()
         if not selection:
@@ -325,6 +336,7 @@ class ConnectionDialog:
         self.database_entry.delete(0, tk.END)
         self.user_entry.delete(0, tk.END)
         self.pass_entry.delete(0, tk.END)
+        self.is_production_var.set(False)
         self.name_entry.focus()
 
     def _save(self):
@@ -348,7 +360,8 @@ class ConnectionDialog:
             messagebox.showwarning("Missing Fields", "Database name is required for this connection type.", parent=self.top)
             return
 
-        self.db.save_connection(name, db_type, host, port, database, user, password, conn_id=self._current_id)
+        is_production = self.is_production_var.get()
+        self.db.save_connection(name, db_type, host, port, database, user, password, conn_id=self._current_id, is_production=is_production)
         self._refresh_list()
         messagebox.showinfo("Saved", f"Connection '{name}' saved.", parent=self.top)
 
