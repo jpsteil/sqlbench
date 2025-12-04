@@ -1,6 +1,7 @@
 """SQL utility tab."""
 
 import re
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import threading
@@ -2968,10 +2969,16 @@ class SQLTab:
                 sql, params = self._generate_update_sql(item_id, changes, original)
                 if sql:
                     cursor = self.connection.cursor()
+                    start_time = time.time()
                     cursor.execute(sql, params)
                     self.connection.commit()
+                    duration = time.time() - start_time
                     cursor.close()
                     success_count += 1
+
+                    # Log the UPDATE statement with actual values
+                    log_sql = self._format_sql_with_params(sql, params)
+                    self.app.db.log_query(self.conn_name, log_sql, duration, 1, "success")
 
                     # Update original values to reflect saved state
                     current_values = self.results_tree.item(item_id, 'values')
@@ -3004,6 +3011,11 @@ class SQLTab:
 
         # Update button state
         self._update_save_button()
+
+        # Refresh query log if any updates were logged
+        if success_count > 0:
+            self._refresh_log_tab()
+            self._notify_log_change()
 
         # Show result
         if errors:
@@ -3073,6 +3085,31 @@ class SQLTab:
             sql = sql.replace('?', '%s')
 
         return sql, set_params + where_params
+
+    def _format_sql_with_params(self, sql, params):
+        """Format SQL with parameter values substituted for logging."""
+        result = sql
+        for param in params:
+            if param is None:
+                value_str = "NULL"
+            elif isinstance(param, str):
+                # Escape single quotes and wrap in quotes
+                escaped = param.replace("'", "''")
+                value_str = f"'{escaped}'"
+            elif isinstance(param, (int, float)):
+                value_str = str(param)
+            else:
+                # For other types, convert to string and quote
+                escaped = str(param).replace("'", "''")
+                value_str = f"'{escaped}'"
+
+            # Replace first placeholder
+            if '%s' in result:
+                result = result.replace('%s', value_str, 1)
+            elif '?' in result:
+                result = result.replace('?', value_str, 1)
+
+        return result
 
 
 class RecordViewerDialog:
