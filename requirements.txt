@@ -1,5 +1,5 @@
-pyodbc
-reportlab
+sqlparse
 openpyxl
+pyodbc
 mysql-connector-python
 psycopg2-binary

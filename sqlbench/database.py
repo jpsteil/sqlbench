@@ -1,13 +1,52 @@
 """SQLite database for storing connections and saved queries."""
 
+import os
+import shutil
 import sqlite3
 from pathlib import Path
+
+
+def _is_installed():
+    """Check if running as an installed package (pipx/pip) vs development."""
+    # If running from site-packages, it's installed
+    return 'site-packages' in str(Path(__file__).resolve())
+
+
+def _get_data_dir():
+    """Get the appropriate data directory based on install type."""
+    if _is_installed():
+        # Installed via pipx/pip - use user data directory
+        if os.name == 'nt':  # Windows
+            base = os.environ.get('APPDATA', Path.home())
+            data_dir = Path(base) / 'sqlbench'
+        else:  # Linux/Mac
+            xdg_data = os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')
+            data_dir = Path(xdg_data) / 'sqlbench'
+
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return data_dir
+        except Exception:
+            return Path(__file__).parent
+    else:
+        # Development mode - use package directory
+        return Path(__file__).parent
 
 
 class Database:
     def __init__(self, db_path=None):
         if db_path is None:
-            db_path = Path(__file__).parent / "iutil.db"
+            data_dir = _get_data_dir()
+            db_path = data_dir / "sqlbench.db"
+
+            # Migrate from old iutil.db location if needed
+            old_path = Path(__file__).parent / "iutil.db"
+            if old_path.exists() and not db_path.exists():
+                try:
+                    shutil.copy2(old_path, db_path)
+                except Exception:
+                    pass
+
         self.db_path = db_path
         self._init_db()
 

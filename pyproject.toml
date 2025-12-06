@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sqlbench"
-version = "0.1.23"
+dynamic = ["version"]
 description = "A multi-database SQL workbench with support for IBM i, MySQL, and PostgreSQL"
 readme = "README.md"
 license = "MIT"
@@ -57,6 +57,9 @@ sqlbench = "sqlbench.__main__:main"
 Homepage = "https://github.com/jpsteil/sqlbench"
 Repository = "https://github.com/jpsteil/sqlbench"
 Issues = "https://github.com/jpsteil/sqlbench/issues"
+
+[tool.hatch.version]
+path = "sqlbench/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sqlbench"]

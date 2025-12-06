@@ -1586,20 +1586,24 @@ class SQLBenchApp:
             pass
 
     def _is_visible_on_screen(self):
-        """Check if at least part of the window is visible on screen."""
+        """Check if window position seems reasonable.
+
+        Only reset if window is clearly off-screen (negative coords or way past
+        primary screen). This allows windows on secondary monitors to be preserved.
+        """
         x = self.root.winfo_x()
         y = self.root.winfo_y()
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
 
-        min_visible = 100
-        visible_x = x + w > min_visible and x < screen_w - min_visible
-        visible_y = y + h > min_visible and y < screen_h - min_visible
+        # Only consider off-screen if clearly beyond reasonable bounds
+        # Allow 3x screen size to accommodate multi-monitor setups
+        max_x = screen_w * 3
+        max_y = screen_h * 2
 
-        return visible_x and visible_y
+        # Window is visible if not clearly off-screen
+        return x > -500 and y > -100 and x < max_x and y < max_y
 
     def _center_window(self):
         """Center window on screen."""
