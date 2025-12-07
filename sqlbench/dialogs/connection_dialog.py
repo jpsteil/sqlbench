@@ -186,6 +186,15 @@ class ConnectionDialog:
         self.production_check.grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
         row += 1
 
+        # Duplicate protection checkbox
+        self.duplicate_protection_var = tk.BooleanVar(value=False)
+        self.duplicate_check = ttk.Checkbutton(
+            detail_frame, text="Duplicate protection (warn on repeated statements)",
+            variable=self.duplicate_protection_var
+        )
+        self.duplicate_check.grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+        row += 1
+
         # Test and Save buttons
         btn_frame = ttk.Frame(detail_frame)
         btn_frame.grid(row=row, column=0, columnspan=3, pady=20)
@@ -307,6 +316,7 @@ class ConnectionDialog:
         self.pass_entry.insert(0, conn["password"])
 
         self.is_production_var.set(bool(conn.get("is_production", 0)))
+        self.duplicate_protection_var.set(bool(conn.get("duplicate_protection", 0)))
 
     def _on_select(self, event):
         selection = self.conn_tree.selection()
@@ -337,6 +347,7 @@ class ConnectionDialog:
         self.user_entry.delete(0, tk.END)
         self.pass_entry.delete(0, tk.END)
         self.is_production_var.set(False)
+        self.duplicate_protection_var.set(False)
         self.name_entry.focus()
 
     def _save(self):
@@ -361,7 +372,8 @@ class ConnectionDialog:
             return
 
         is_production = self.is_production_var.get()
-        self.db.save_connection(name, db_type, host, port, database, user, password, conn_id=self._current_id, is_production=is_production)
+        duplicate_protection = self.duplicate_protection_var.get()
+        self.db.save_connection(name, db_type, host, port, database, user, password, conn_id=self._current_id, is_production=is_production, duplicate_protection=duplicate_protection)
         self._refresh_list()
         messagebox.showinfo("Saved", f"Connection '{name}' saved.", parent=self.top)
 

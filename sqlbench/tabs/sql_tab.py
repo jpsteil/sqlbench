@@ -42,6 +42,10 @@ class SQLTab:
         self._modified_cells = {}  # iid -> {col_index: new_value}
         self._edit_entry = None  # Current edit Entry widget
 
+        # Recent statements tracking (for duplicate detection on production)
+        self._recent_destructive_stmts = []  # Last 10 destructive statements
+        self._max_recent_stmts = 10
+
         self._create_widgets()
         self._bind_keys()
 
@@ -100,6 +104,17 @@ class SQLTab:
             return False
         return bool(conn_info.get("is_production", 0))
 
+    def _has_duplicate_protection(self):
+        """Check if the current connection has duplicate protection enabled."""
+        conn_data = self.app.connections.get(self.conn_name)
+        if not conn_data:
+            return False
+        conn_info = conn_data.get("info")
+        if not conn_info:
+            return False
+        # Handle None from existing rows (before migration set default)
+        return bool(conn_info.get("duplicate_protection") or 0)
+
     def _is_destructive_sql(self, sql):
         """Check if a SQL statement is destructive (modifies/deletes data or schema)."""
         sql_upper = sql.strip().upper()
@@ -142,6 +157,37 @@ class SQLTab:
             f"You are about to execute a {stmt_type} statement:\n\n"
             f"{display_sql}\n\n"
             f"Are you sure you want to proceed?",
+            icon="warning"
+        )
+
+    def _normalize_sql(self, sql):
+        """Normalize SQL for comparison (collapse whitespace, strip)."""
+        return ' '.join(sql.split()).strip()
+
+    def _is_duplicate_statement(self, sql):
+        """Check if this statement was recently executed (last 10 destructive stmts)."""
+        normalized = self._normalize_sql(sql)
+        return normalized in self._recent_destructive_stmts
+
+    def _record_destructive_statement(self, sql):
+        """Record a destructive statement in the recent history."""
+        normalized = self._normalize_sql(sql)
+        # Remove if already in list (will re-add at end)
+        if normalized in self._recent_destructive_stmts:
+            self._recent_destructive_stmts.remove(normalized)
+        self._recent_destructive_stmts.append(normalized)
+        # Keep only last N statements
+        if len(self._recent_destructive_stmts) > self._max_recent_stmts:
+            self._recent_destructive_stmts.pop(0)
+
+    def _warn_duplicate_statement(self, sql):
+        """Warn user about duplicate statement. Returns True to proceed."""
+        display_sql = sql[:100] + "..." if len(sql) > 100 else sql
+        return messagebox.askyesno(
+            "Duplicate Statement",
+            f"This statement was recently executed:\n\n"
+            f"{display_sql}\n\n"
+            f"Are you sure you want to run it again?",
             icon="warning"
         )
 
@@ -1123,10 +1169,20 @@ class SQLTab:
         if not sql:
             return
 
-        # Check for destructive SQL on production connections
-        if self._is_production_connection() and self._is_destructive_sql(sql):
-            if not self._confirm_destructive_query(sql):
-                return
+        # Check for destructive SQL
+        if self._is_destructive_sql(sql):
+            # Check for duplicate statement if duplicate protection is enabled
+            if self._has_duplicate_protection():
+                if self._is_duplicate_statement(sql):
+                    if not self._warn_duplicate_statement(sql):
+                        return
+                # Record this statement for future duplicate detection
+                self._record_destructive_statement(sql)
+
+            # Confirm destructive action on production connections
+            if self._is_production_connection():
+                if not self._confirm_destructive_query(sql):
+                    return
 
         # Clear previous results
         self._all_rows = []
@@ -1171,10 +1227,29 @@ class SQLTab:
         if not statements:
             return
 
-        # Check for destructive SQL on production connections
-        if self._is_production_connection():
-            destructive_stmts = [s for s in statements if self._is_destructive_sql(s)]
-            if destructive_stmts:
+        # Check for destructive SQL
+        destructive_stmts = [s for s in statements if self._is_destructive_sql(s)]
+        if destructive_stmts:
+            # Check for duplicate statements if duplicate protection is enabled
+            if self._has_duplicate_protection():
+                duplicate_stmts = [s for s in destructive_stmts if self._is_duplicate_statement(s)]
+                if duplicate_stmts:
+                    if not messagebox.askyesno(
+                        "Duplicate Statements",
+                        f"This script contains {len(duplicate_stmts)} statement(s) "
+                        f"that were recently executed:\n\n"
+                        f"{', '.join(s.split()[0].upper() for s in duplicate_stmts[:5])}"
+                        f"{'...' if len(duplicate_stmts) > 5 else ''}\n\n"
+                        f"Are you sure you want to run them again?",
+                        icon="warning"
+                    ):
+                        return
+                # Record all destructive statements
+                for stmt in destructive_stmts:
+                    self._record_destructive_statement(stmt)
+
+            # Confirm destructive action on production connections
+            if self._is_production_connection():
                 if not messagebox.askyesno(
                     "Production Database",
                     f"This is a PRODUCTION connection.\n\n"
