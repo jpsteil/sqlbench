@@ -1665,20 +1665,25 @@ class SQLBenchApp:
 
         # Ignore sash positions that are too small (would hide the pane)
         MIN_SASH_POS = 50
-        if sql_sash and int(sql_sash) < MIN_SASH_POS:
-            sql_sash = None
-        if spool_sash and int(spool_sash) < MIN_SASH_POS:
-            spool_sash = None
 
         for tab_id in self.notebook.tabs():
             try:
                 tab_frame = self.notebook.nametowidget(tab_id)
                 if sql_sash and hasattr(tab_frame, 'sql_tab') and hasattr(tab_frame.sql_tab, 'paned'):
                     self.root.update_idletasks()
-                    tab_frame.sql_tab.paned.sashpos(0, int(sql_sash))
+                    pane_height = tab_frame.sql_tab.paned.winfo_height()
+                    sash_val = int(sql_sash)
+                    # Cap sash position to leave room for results (at least 150px)
+                    max_sash = max(MIN_SASH_POS, pane_height - 150)
+                    sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
+                    tab_frame.sql_tab.paned.sashpos(0, sash_val)
                 elif spool_sash and hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
                     self.root.update_idletasks()
-                    tab_frame.spool_tab.paned.sashpos(0, int(spool_sash))
+                    pane_height = tab_frame.spool_tab.paned.winfo_height()
+                    sash_val = int(spool_sash)
+                    max_sash = max(MIN_SASH_POS, pane_height - 150)
+                    sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
+                    tab_frame.spool_tab.paned.sashpos(0, sash_val)
             except Exception:
                 pass
 
