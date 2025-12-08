@@ -21,6 +21,9 @@ class SQLBenchApp:
         self.root = tk.Tk(className="sqlbench")
         self.root.title(f"SQLBench v{__version__}")
 
+        # Hide window during setup to prevent visual flash during layout restoration
+        self.root.withdraw()
+
         # Set window icon
         self._set_window_icon()
 
@@ -1673,22 +1676,28 @@ class SQLBenchApp:
                     self.root.update_idletasks()
                     pane_height = tab_frame.sql_tab.paned.winfo_height()
                     sash_val = int(sql_sash)
-                    # Cap sash position to leave room for results (at least 150px)
-                    max_sash = max(MIN_SASH_POS, pane_height - 150)
-                    sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
+                    # Only apply bounds if pane is fully laid out (height > 300)
+                    if pane_height > 300:
+                        max_sash = pane_height - 150
+                        sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
                     tab_frame.sql_tab.paned.sashpos(0, sash_val)
                 elif spool_sash and hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
                     self.root.update_idletasks()
                     pane_height = tab_frame.spool_tab.paned.winfo_height()
                     sash_val = int(spool_sash)
-                    max_sash = max(MIN_SASH_POS, pane_height - 150)
-                    sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
+                    # Only apply bounds if pane is fully laid out (height > 300)
+                    if pane_height > 300:
+                        max_sash = pane_height - 150
+                        sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
                     tab_frame.spool_tab.paned.sashpos(0, sash_val)
             except Exception:
                 pass
 
         # Restore the last active tab
         self._restore_active_tab()
+
+        # Show window after a short delay to let layout settle
+        self.root.after(50, self.root.deiconify)
 
     def _reset_layout(self):
         """Reset layout to defaults."""
