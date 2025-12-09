@@ -1625,71 +1625,79 @@ class SQLBenchApp:
         self.db.set_setting("window_geometry", geometry)
 
     def _save_layout(self):
-        """Save paned window sash positions."""
+        """Save paned window sash positions as ratios for reliable restore."""
         try:
-            # Main paned window (connections | tabs)
+            # Main paned window (connections | tabs) - horizontal, save as ratio of width
             sash_pos = self.main_paned.sashpos(0)
-            self.db.set_setting("layout_main_sash", str(sash_pos))
+            pane_width = self.main_paned.winfo_width()
+            if pane_width > 100:
+                ratio = sash_pos / pane_width
+                self.db.set_setting("layout_main_ratio", f"{ratio:.4f}")
         except Exception:
             pass
 
-        # Save tab-level layouts (use last found position for each type)
-        sql_sash = None
-        spool_sash = None
-
+        # Save tab-level layouts as ratios
         for tab_id in self.notebook.tabs():
             try:
                 tab_frame = self.notebook.nametowidget(tab_id)
                 if hasattr(tab_frame, 'sql_tab') and hasattr(tab_frame.sql_tab, 'paned'):
-                    sql_sash = tab_frame.sql_tab.paned.sashpos(0)
-                elif hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
-                    spool_sash = tab_frame.spool_tab.paned.sashpos(0)
+                    sash_pos = tab_frame.sql_tab.paned.sashpos(0)
+                    pane_height = tab_frame.sql_tab.paned.winfo_height()
+                    if pane_height > 100:
+                        ratio = sash_pos / pane_height
+                        self.db.set_setting("layout_sql_ratio", f"{ratio:.4f}")
+                    break  # Only need one SQL tab's position
             except Exception:
                 pass
-
-        if sql_sash is not None:
-            self.db.set_setting("layout_sql_sash", str(sql_sash))
-        if spool_sash is not None:
-            self.db.set_setting("layout_spool_sash", str(spool_sash))
-
-    def _restore_layout(self):
-        """Restore paned window sash positions."""
-        try:
-            sash_pos = self.db.get_setting("layout_main_sash")
-            if sash_pos:
-                self.root.update_idletasks()
-                self.main_paned.sashpos(0, int(sash_pos))
-        except Exception:
-            pass
-
-        # Restore tab-level layouts (only if saved value is reasonable)
-        sql_sash = self.db.get_setting("layout_sql_sash")
-        spool_sash = self.db.get_setting("layout_spool_sash")
-
-        # Ignore sash positions that are too small (would hide the pane)
-        MIN_SASH_POS = 50
 
         for tab_id in self.notebook.tabs():
             try:
                 tab_frame = self.notebook.nametowidget(tab_id)
-                if sql_sash and hasattr(tab_frame, 'sql_tab') and hasattr(tab_frame.sql_tab, 'paned'):
-                    self.root.update_idletasks()
+                if hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
+                    sash_pos = tab_frame.spool_tab.paned.sashpos(0)
+                    pane_width = tab_frame.spool_tab.paned.winfo_width()
+                    if pane_width > 100:
+                        ratio = sash_pos / pane_width
+                        self.db.set_setting("layout_spool_ratio", f"{ratio:.4f}")
+                    break  # Only need one spool tab's position
+            except Exception:
+                pass
+
+    def _restore_layout(self):
+        """Restore paned window sash positions from saved ratios."""
+        self.root.update_idletasks()
+
+        # Restore main paned (connections | tabs) from ratio
+        try:
+            ratio_str = self.db.get_setting("layout_main_ratio")
+            if ratio_str:
+                ratio = float(ratio_str)
+                pane_width = self.main_paned.winfo_width()
+                if pane_width > 100 and 0.05 <= ratio <= 0.95:
+                    sash_pos = int(ratio * pane_width)
+                    self.main_paned.sashpos(0, sash_pos)
+        except Exception:
+            pass
+
+        # Restore SQL tab sash from ratio
+        sql_ratio_str = self.db.get_setting("layout_sql_ratio")
+        spool_ratio_str = self.db.get_setting("layout_spool_ratio")
+
+        for tab_id in self.notebook.tabs():
+            try:
+                tab_frame = self.notebook.nametowidget(tab_id)
+                if sql_ratio_str and hasattr(tab_frame, 'sql_tab') and hasattr(tab_frame.sql_tab, 'paned'):
+                    ratio = float(sql_ratio_str)
                     pane_height = tab_frame.sql_tab.paned.winfo_height()
-                    sash_val = int(sql_sash)
-                    # Only apply bounds if pane is fully laid out (height > 300)
-                    if pane_height > 300:
-                        max_sash = pane_height - 150
-                        sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
-                    tab_frame.sql_tab.paned.sashpos(0, sash_val)
-                elif spool_sash and hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
-                    self.root.update_idletasks()
-                    pane_height = tab_frame.spool_tab.paned.winfo_height()
-                    sash_val = int(spool_sash)
-                    # Only apply bounds if pane is fully laid out (height > 300)
-                    if pane_height > 300:
-                        max_sash = pane_height - 150
-                        sash_val = max(MIN_SASH_POS, min(sash_val, max_sash))
-                    tab_frame.spool_tab.paned.sashpos(0, sash_val)
+                    if pane_height > 100 and 0.1 <= ratio <= 0.9:
+                        sash_pos = int(ratio * pane_height)
+                        tab_frame.sql_tab.paned.sashpos(0, sash_pos)
+                elif spool_ratio_str and hasattr(tab_frame, 'spool_tab') and hasattr(tab_frame.spool_tab, 'paned'):
+                    ratio = float(spool_ratio_str)
+                    pane_width = tab_frame.spool_tab.paned.winfo_width()
+                    if pane_width > 100 and 0.1 <= ratio <= 0.9:
+                        sash_pos = int(ratio * pane_width)
+                        tab_frame.spool_tab.paned.sashpos(0, sash_pos)
             except Exception:
                 pass
 
@@ -1701,10 +1709,13 @@ class SQLBenchApp:
 
     def _reset_layout(self):
         """Reset layout to defaults."""
-        # Clear saved layout settings
+        # Clear saved layout settings (both old and new format)
         self.db.set_setting("layout_main_sash", "")
         self.db.set_setting("layout_sql_sash", "")
         self.db.set_setting("layout_spool_sash", "")
+        self.db.set_setting("layout_main_ratio", "")
+        self.db.set_setting("layout_sql_ratio", "")
+        self.db.set_setting("layout_spool_ratio", "")
 
         # Reset font size to default
         self.font_size = 10

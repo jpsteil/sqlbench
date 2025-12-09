@@ -2606,14 +2606,35 @@ class SQLTab:
         self.sql_context_menu.add_separator()
         self.sql_context_menu.add_command(label="Find...", command=self._show_sql_search_dialog, accelerator="Ctrl+F")
 
-        self.sql_text.bind("<Button-3>", self._show_sql_context_menu)
+        self.sql_text.bind("<ButtonPress-3>", self._save_selection_for_context_menu)
+        self.sql_text.bind("<ButtonRelease-3>", self._show_sql_context_menu)
         self.sql_text.bind("<Control-f>", lambda e: self._show_sql_search_dialog())
         self.sql_text.bind("<Control-F>", lambda e: self._show_sql_search_dialog())
         self.sql_text.bind("<Control-z>", lambda e: self._sql_undo())
         self.sql_text.bind("<Control-Z>", lambda e: self._sql_redo())  # Ctrl+Shift+Z
+        self.sql_text.bind("<Control-v>", self._on_paste)
+        self.sql_text.bind("<Control-V>", self._on_paste)
+
+    def _on_paste(self, event):
+        """Handle paste to replace selection like a normal editor."""
+        self._sql_paste()
+        return "break"  # Prevent default paste behavior
+
+    def _save_selection_for_context_menu(self, event):
+        """Save selection before right-click clears it."""
+        try:
+            self._saved_selection = (self.sql_text.index("sel.first"), self.sql_text.index("sel.last"))
+        except tk.TclError:
+            self._saved_selection = None
+        return "break"  # Prevent default behavior from clearing selection
 
     def _show_sql_context_menu(self, event):
         """Show context menu at mouse position."""
+        # Restore selection if it was saved (right-click clears it)
+        if hasattr(self, '_saved_selection') and self._saved_selection:
+            self.sql_text.tag_remove("sel", "1.0", "end")
+            self.sql_text.tag_add("sel", self._saved_selection[0], self._saved_selection[1])
+
         # Enable/disable undo based on edit history
         try:
             self.sql_text.edit_undo()
@@ -2638,6 +2659,7 @@ class SQLTab:
             self.sql_context_menu.entryconfig("Paste", state=tk.DISABLED)
 
         self.sql_context_menu.tk_popup(event.x_root, event.y_root, 0)
+        return "break"  # Prevent default behavior that moves cursor/deselects
 
     def _sql_undo(self):
         """Undo last edit."""
@@ -2660,33 +2682,65 @@ class SQLTab:
     def _sql_cut(self):
         """Cut selected text to clipboard."""
         try:
-            selected = self.sql_text.get("sel.first", "sel.last")
-            self.app.root.clipboard_clear()
-            self.app.root.clipboard_append(selected)
-            self.sql_text.delete("sel.first", "sel.last")
+            # Use saved selection from context menu if available
+            if hasattr(self, '_saved_selection') and self._saved_selection:
+                sel_start, sel_end = self._saved_selection
+                selected = self.sql_text.get(sel_start, sel_end)
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append(selected)
+                self.sql_text.delete(sel_start, sel_end)
+                self._saved_selection = None
+            else:
+                selected = self.sql_text.get("sel.first", "sel.last")
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append(selected)
+                self.sql_text.delete("sel.first", "sel.last")
         except tk.TclError:
             pass  # No selection
 
     def _sql_copy(self):
         """Copy selected text to clipboard."""
         try:
-            selected = self.sql_text.get("sel.first", "sel.last")
-            self.app.root.clipboard_clear()
-            self.app.root.clipboard_append(selected)
+            # Use saved selection from context menu if available
+            if hasattr(self, '_saved_selection') and self._saved_selection:
+                sel_start, sel_end = self._saved_selection
+                selected = self.sql_text.get(sel_start, sel_end)
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append(selected)
+                self._saved_selection = None
+            else:
+                selected = self.sql_text.get("sel.first", "sel.last")
+                self.app.root.clipboard_clear()
+                self.app.root.clipboard_append(selected)
         except tk.TclError:
             pass  # No selection
 
     def _sql_paste(self):
         """Paste text from clipboard."""
         try:
-            # Delete selection if any
-            try:
-                self.sql_text.delete("sel.first", "sel.last")
-            except tk.TclError:
-                pass
+            # Mark undo separator before paste
+            self.sql_text.edit_separator()
+
+            # Delete selection if any (check saved selection from context menu first)
+            deleted = False
+            if hasattr(self, '_saved_selection') and self._saved_selection:
+                # Use saved selection from context menu
+                self.sql_text.delete(self._saved_selection[0], self._saved_selection[1])
+                self.sql_text.mark_set("insert", self._saved_selection[0])
+                self._saved_selection = None
+                deleted = True
+            if not deleted:
+                try:
+                    self.sql_text.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass
             # Get clipboard content and insert
             text = self.app.root.clipboard_get()
             self.sql_text.insert("insert", text)
+
+            # Mark undo separator after paste and update highlighting
+            self.sql_text.edit_separator()
+            self._highlight_sql()
         except tk.TclError:
             pass  # Nothing in clipboard
 
