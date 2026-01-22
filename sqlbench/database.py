@@ -312,3 +312,65 @@ class Database:
             else:
                 conn.execute("DELETE FROM query_log")
             conn.commit()
+
+
+# Module-level singleton and convenience functions
+_db = None
+
+
+def _get_db():
+    """Get the singleton Database instance."""
+    global _db
+    if _db is None:
+        _db = Database()
+    return _db
+
+
+def get_connections():
+    """Get all saved connections."""
+    return _get_db().get_connections()
+
+
+def get_connection(name):
+    """Get a connection by name."""
+    return _get_db().get_connection(name)
+
+
+def save_connection(conn_data, old_name=None):
+    """Save a connection. If old_name provided, updates existing."""
+    db = _get_db()
+    conn_id = None
+    if old_name:
+        existing = db.get_connection(old_name)
+        if existing:
+            conn_id = existing.get('id')
+    return db.save_connection(
+        name=conn_data['name'],
+        db_type=conn_data['db_type'],
+        host=conn_data['host'],
+        port=conn_data.get('port'),
+        database=conn_data.get('database'),
+        user=conn_data['user'],
+        password=conn_data['password'],
+        conn_id=conn_id,
+        is_production=conn_data.get('production', False),
+        duplicate_protection=conn_data.get('duplicate_protection', True)
+    )
+
+
+def delete_connection(name):
+    """Delete a connection by name."""
+    db = _get_db()
+    conn = db.get_connection(name)
+    if conn:
+        db.delete_connection(conn['id'])
+
+
+def get_setting(key, default=None):
+    """Get a setting value."""
+    return _get_db().get_setting(key, default)
+
+
+def set_setting(key, value):
+    """Set a setting value."""
+    return _get_db().set_setting(key, value)

@@ -1,18 +1,26 @@
-.PHONY: run install clean
+.PHONY: run run-qt install-qt clean
 
 VENV := venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-run: $(VENV)
-	$(PYTHON) -m sqlbench
+run: $(VENV)/bin/activate
+	$(PYTHON) -m sqlbench --tk
 
-install: $(VENV)
+run-qt: $(VENV)/bin/activate
+	@if ! $(PIP) show PyQt6 > /dev/null 2>&1; then \
+		echo "Installing PyQt6..."; \
+		$(PIP) install PyQt6; \
+	fi
+	$(PYTHON) -m sqlbench --qt
 
-$(VENV): requirements.txt
-	python3 -m venv $(VENV)
+install-qt: $(VENV)/bin/activate
+	$(PIP) install PyQt6
+
+$(VENV)/bin/activate: requirements.txt
+	python3 -m venv $(VENV) && \
+	$(PIP) install --upgrade pip && \
 	$(PIP) install -r requirements.txt
-	touch $(VENV)
 
 clean:
 	rm -rf $(VENV)

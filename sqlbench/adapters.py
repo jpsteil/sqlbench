@@ -673,3 +673,11 @@ def get_unavailable_adapters():
         for key, cls in ADAPTERS.items()
         if not cls.is_available()
     ]
+
+
+def get_available_adapters():
+    """Get dict of adapter availability.
+
+    Returns dict of {db_type: is_available}.
+    """
+    return {key: cls.is_available() for key, cls in ADAPTERS.items()}
