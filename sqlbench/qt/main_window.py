@@ -578,13 +578,25 @@ class MainWindow(QMainWindow):
 
     def _check_for_updates(self) -> None:
         """Check for updates in background."""
-        from ..version import check_for_updates
+        from ..version import get_pypi_version, is_newer_version, __version__
 
-        def on_result(has_update, latest_version):
-            if has_update:
-                QTimer.singleShot(0, lambda: self._show_update_dialog(latest_version))
+        def do_check():
+            try:
+                latest = get_pypi_version()
+                if latest and is_newer_version(latest, __version__):
+                    self._update_version = latest
+            except Exception:
+                pass
 
-        check_for_updates(on_result)
+        def on_done():
+            version = getattr(self, '_update_version', None)
+            if version:
+                self._show_update_dialog(version)
+
+        thread = threading.Thread(target=do_check, daemon=True)
+        thread.start()
+        # Poll from main thread until the background check completes
+        QTimer.singleShot(3000, on_done)
 
     def _show_update_dialog(self, latest_version: str) -> None:
         """Show update available dialog."""
