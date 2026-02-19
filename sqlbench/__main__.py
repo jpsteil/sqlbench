@@ -82,10 +82,11 @@ def check_tkinter():
 
 def run_pyqt():
     """Run the PyQt6 GUI."""
+    import os
+
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QIcon
-    import os
 
     from sqlbench.qt import MainWindow
 

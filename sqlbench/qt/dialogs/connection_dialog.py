@@ -45,13 +45,6 @@ class ConnectionDialog(QDialog):
         self.setMinimumSize(700, 500)
         self.resize(800, 550)
 
-        if parent is not None:
-            pg = parent.frameGeometry()
-            self.move(
-                pg.x() + (pg.width() - self.width()) // 2,
-                pg.y() + (pg.height() - self.height()) // 2,
-            )
-
         self._current_connection: Optional[str] = None
         self._is_new = connection_name is None
 

@@ -2033,19 +2033,6 @@ class SQLTab(QWidget):
 
         # cellChanged is always connected; _loading_results flag guards against false edits
 
-    def _center_dialog(self, dialog) -> None:
-        """Center a dialog on the main window."""
-        win = self.window()
-        fg = win.frameGeometry()
-        # Force layout to get real size, then position before showing
-        dialog.layout().activate()
-        dialog.adjustSize()
-        ds = dialog.sizeHint()
-        x = fg.x() + (fg.width() - ds.width()) // 2
-        y = fg.y() + (fg.height() - ds.height()) // 2
-        dialog.setGeometry(x, y, ds.width(), ds.height())
-        dialog.setAttribute(Qt.WidgetAttribute.WA_Moved, True)
-
     def _on_cell_changed(self, row: int, col: int) -> None:
         """Track cell modifications."""
         if self._loading_results:
@@ -2113,7 +2100,7 @@ class SQLTab(QWidget):
                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                           self.window())
         msg.setDefaultButton(QMessageBox.StandardButton.No)
-        self._center_dialog(msg)
+
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
@@ -2185,7 +2172,7 @@ class SQLTab(QWidget):
                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                           self.window())
         msg.setDefaultButton(QMessageBox.StandardButton.No)
-        self._center_dialog(msg)
+
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
