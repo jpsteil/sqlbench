@@ -4,6 +4,7 @@ SQL Tab Widget for SQLBench PyQt6 GUI.
 Provides SQL editor with syntax highlighting and results display.
 """
 
+import re
 import time
 from typing import Optional, Any, List, Tuple
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
@@ -14,6 +15,11 @@ from PyQt6.QtGui import (
     QShortcut,
     QAction,
     QColor,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QPen,
+    QPainterPath,
 )
 from PyQt6.QtWidgets import (
     QWidget,
@@ -31,12 +37,14 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QLineEdit,
     QPushButton,
+    QToolButton,
     QComboBox,
     QMenu,
     QFileDialog,
     QMessageBox,
     QHeaderView,
     QAbstractItemView,
+    QApplication,
     QFrame,
 )
 
@@ -45,34 +53,148 @@ from ..theme import Theme
 from ...database import get_setting, set_setting, _get_db, get_connection
 
 
+def _make_icon(shape: str, color: str = "#ddd", size: int = 18) -> QIcon:
+    """Create a simple painted icon."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QColor(color)
+    m = size  # shorthand
+
+    if shape == "play":
+        p.setBrush(c)
+        p.setPen(Qt.PenStyle.NoPen)
+        path = QPainterPath()
+        path.moveTo(m * 0.2, m * 0.1)
+        path.lineTo(m * 0.85, m * 0.5)
+        path.lineTo(m * 0.2, m * 0.9)
+        path.closeSubpath()
+        p.drawPath(path)
+
+    elif shape == "play_all":
+        p.setBrush(c)
+        p.setPen(Qt.PenStyle.NoPen)
+        path1 = QPainterPath()
+        path1.moveTo(m * 0.1, m * 0.15)
+        path1.lineTo(m * 0.5, m * 0.5)
+        path1.lineTo(m * 0.1, m * 0.85)
+        path1.closeSubpath()
+        p.drawPath(path1)
+        path2 = QPainterPath()
+        path2.moveTo(m * 0.45, m * 0.15)
+        path2.lineTo(m * 0.85, m * 0.5)
+        path2.lineTo(m * 0.45, m * 0.85)
+        path2.closeSubpath()
+        p.drawPath(path2)
+
+    elif shape == "stop":
+        p.setBrush(c)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRect(int(m * 0.2), int(m * 0.2), int(m * 0.6), int(m * 0.6))
+
+    elif shape == "save":
+        pen = QPen(c, 1.5)
+        p.setPen(pen)
+        p.setBrush(QColor(0, 0, 0, 0))
+        p.drawRect(int(m * 0.1), int(m * 0.05), int(m * 0.8), int(m * 0.9))
+        p.drawRect(int(m * 0.3), int(m * 0.05), int(m * 0.35), int(m * 0.3))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRect(int(m * 0.25), int(m * 0.55), int(m * 0.5), int(m * 0.3))
+
+    elif shape == "open":
+        pen = QPen(c, 1.5)
+        p.setPen(pen)
+        p.setBrush(QColor(0, 0, 0, 0))
+        p.drawRect(int(m * 0.05), int(m * 0.3), int(m * 0.9), int(m * 0.6))
+        p.drawLine(int(m * 0.05), int(m * 0.3), int(m * 0.05), int(m * 0.15))
+        p.drawLine(int(m * 0.05), int(m * 0.15), int(m * 0.4), int(m * 0.15))
+        p.drawLine(int(m * 0.4), int(m * 0.15), int(m * 0.5), int(m * 0.3))
+
+    elif shape == "clear":
+        pen = QPen(c, 2.0)
+        p.setPen(pen)
+        p.drawLine(int(m * 0.2), int(m * 0.2), int(m * 0.8), int(m * 0.8))
+        p.drawLine(int(m * 0.8), int(m * 0.2), int(m * 0.2), int(m * 0.8))
+
+    elif shape == "format":
+        pen = QPen(c, 1.5)
+        p.setPen(pen)
+        p.drawLine(int(m * 0.1), int(m * 0.2), int(m * 0.9), int(m * 0.2))
+        p.drawLine(int(m * 0.25), int(m * 0.4), int(m * 0.9), int(m * 0.4))
+        p.drawLine(int(m * 0.25), int(m * 0.6), int(m * 0.9), int(m * 0.6))
+        p.drawLine(int(m * 0.1), int(m * 0.8), int(m * 0.9), int(m * 0.8))
+
+    p.end()
+    return QIcon(pixmap)
+
+
 class QueryWorker(QThread):
     """Background thread for query execution."""
 
-    finished = pyqtSignal(object, object, float, float)  # results, description, exec_time, fetch_time
+    finished = pyqtSignal(object, object, float, float, int)  # results, description, exec_time, fetch_time, total_rows
     error = pyqtSignal(str)
     row_count = pyqtSignal(int)
 
-    def __init__(self, connection: Any, sql: str, limit: int = 1000,
-                 offset: int = 0, fetch_all: bool = False):
+    def __init__(self, connection: Any, sql: str, adapter: Any = None,
+                 limit: int = 1000, offset: int = 0,
+                 fetch_all: bool = False, run_count: bool = True):
         super().__init__()
         self.connection = connection
         self.sql = sql
+        self.adapter = adapter
         self.limit = limit
         self.offset = offset
         self.fetch_all = fetch_all
+        self.run_count = run_count
         self._cancelled = False
 
     def cancel(self) -> None:
         """Request cancellation."""
         self._cancelled = True
 
+    @staticmethod
+    def _has_limit_clause(sql_upper: str) -> bool:
+        """Check if SQL already has a row limit clause."""
+        return any(kw in sql_upper for kw in
+                   ["FETCH FIRST", "FETCH NEXT", "LIMIT ", "OFFSET "])
+
     def run(self) -> None:
         """Execute query in background."""
         try:
             cursor = self.connection.cursor()
 
+            sql_stripped = self.sql.strip()
+            while sql_stripped.endswith(';'):
+                sql_stripped = sql_stripped[:-1].strip()
+            sql_upper = sql_stripped.upper()
+            is_select = sql_upper.startswith("SELECT")
+
+            # Run COUNT query first for SELECT statements
+            total_rows = 0
+            if (is_select and self.run_count and self.adapter
+                    and not self._has_limit_clause(sql_upper)):
+                try:
+                    count_sql = self.adapter.get_count_sql(sql_stripped)
+                    cursor.execute(count_sql)
+                    total_rows = cursor.fetchone()[0]
+                except Exception:
+                    pass  # Count failed, continue without total
+                if self._cancelled:
+                    cursor.close()
+                    return
+
+            # Build paginated query for SELECT
+            if (is_select and self.adapter and not self.fetch_all
+                    and not self._has_limit_clause(sql_upper)):
+                executed_sql = self.adapter.add_pagination(
+                    sql_stripped, self.limit, self.offset)
+            else:
+                executed_sql = sql_stripped
+
             exec_start = time.time()
-            cursor.execute(self.sql)
+            cursor.execute(executed_sql)
             exec_time = time.time() - exec_start
 
             if self._cancelled:
@@ -81,28 +203,117 @@ class QueryWorker(QThread):
 
             fetch_start = time.time()
 
-            # Check if this is a SELECT query
             if cursor.description:
-                if self.fetch_all:
-                    rows = cursor.fetchall()
-                else:
-                    rows = cursor.fetchmany(self.limit)
+                rows = cursor.fetchall()
                 description = cursor.description
+                if total_rows == 0:
+                    total_rows = len(rows)
             else:
                 rows = []
                 description = None
-                # For INSERT/UPDATE/DELETE, get row count
                 self.row_count.emit(cursor.rowcount)
 
             fetch_time = time.time() - fetch_start
             cursor.close()
 
             if not self._cancelled:
-                self.finished.emit(rows, description, exec_time, fetch_time)
+                self.finished.emit(rows, description, exec_time, fetch_time, total_rows)
 
         except Exception as e:
             if not self._cancelled:
                 self.error.emit(str(e))
+
+
+class ScriptWorker(QThread):
+    """Background thread for executing multiple SQL statements."""
+
+    all_finished = pyqtSignal(list, float)  # results_list, total_time
+    error = pyqtSignal(str)
+
+    def __init__(self, connection: Any, statements: List[str]):
+        super().__init__()
+        self.connection = connection
+        self.statements = statements
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation."""
+        self._cancelled = True
+
+    def run(self) -> None:
+        """Execute all statements sequentially."""
+        results = []
+        total_start = time.time()
+
+        for i, stmt in enumerate(self.statements):
+            if self._cancelled:
+                break
+
+            stmt_stripped = stmt.strip()
+            if not stmt_stripped:
+                continue
+            while stmt_stripped.endswith(';'):
+                stmt_stripped = stmt_stripped[:-1].strip()
+            if not stmt_stripped:
+                continue
+
+            result = {
+                "stmt": i + 1,
+                "sql": stmt_stripped[:200] + ('...' if len(stmt_stripped) > 200 else ''),
+                "full_sql": stmt_stripped,
+                "status": "",
+                "time": 0.0,
+                "row_count": 0,
+                "success": True,
+                "error": None,
+            }
+
+            try:
+                cursor = self.connection.cursor()
+                start = time.time()
+                cursor.execute(stmt_stripped)
+                elapsed = time.time() - start
+
+                if cursor.description:
+                    rows = cursor.fetchall()
+                    result["row_count"] = len(rows)
+                    result["status"] = f"{len(rows)} row(s) returned"
+                else:
+                    rc = cursor.rowcount if cursor.rowcount >= 0 else 0
+                    result["row_count"] = rc
+                    sql_upper = stmt_stripped.upper()
+                    if sql_upper.startswith("INSERT"):
+                        result["status"] = f"{rc} row(s) inserted"
+                    elif sql_upper.startswith("UPDATE"):
+                        result["status"] = f"{rc} row(s) updated"
+                    elif sql_upper.startswith("DELETE"):
+                        result["status"] = f"{rc} row(s) deleted"
+                    else:
+                        result["status"] = f"OK ({rc} row(s) affected)"
+                    try:
+                        self.connection.commit()
+                    except Exception:
+                        pass
+
+                result["time"] = elapsed
+                cursor.close()
+
+            except Exception as e:
+                result["success"] = False
+                result["status"] = "ERROR"
+                result["error"] = str(e)
+                result["time"] = time.time() - start
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+
+            results.append(result)
+
+        total_time = time.time() - total_start
+
+        if not self._cancelled:
+            self.all_finished.emit(results, total_time)
 
 
 class SQLEditor(QPlainTextEdit):
@@ -110,6 +321,7 @@ class SQLEditor(QPlainTextEdit):
 
     execute_requested = pyqtSignal()
     execute_all_requested = pyqtSignal()
+    find_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -138,11 +350,18 @@ class SQLEditor(QPlainTextEdit):
         """Show context menu."""
         menu = QMenu(self)
 
-        menu.addAction("Select All", self.selectAll, QKeySequence("Ctrl+A"))
+        undo_action = menu.addAction("Undo", self.undo, QKeySequence("Ctrl+Z"))
+        undo_action.setEnabled(self.document().isUndoAvailable())
+        redo_action = menu.addAction("Redo", self.redo, QKeySequence("Ctrl+Y"))
+        redo_action.setEnabled(self.document().isRedoAvailable())
         menu.addSeparator()
         menu.addAction("Cut", self.cut, QKeySequence("Ctrl+X"))
         menu.addAction("Copy", self.copy, QKeySequence("Ctrl+C"))
         menu.addAction("Paste", self.paste, QKeySequence("Ctrl+V"))
+        menu.addSeparator()
+        menu.addAction("Select All", self.selectAll, QKeySequence("Ctrl+A"))
+        menu.addSeparator()
+        menu.addAction("Find...", self.find_requested.emit, QKeySequence("Ctrl+F"))
 
         menu.exec(self.mapToGlobal(pos))
 
@@ -253,6 +472,7 @@ class ResultsTable(QTableWidget):
         # Header setup
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.horizontalHeader().sectionDoubleClicked.connect(self._auto_fit_column)
         self.verticalHeader().setDefaultSectionSize(24)
 
         # Context menu
@@ -295,7 +515,6 @@ class ResultsTable(QTableWidget):
                 row_data.append(item.text() if item else "")
             lines.append("\t".join(row_data))
 
-        from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText("\n".join(lines))
 
     def _copy_with_headers(self) -> None:
@@ -331,8 +550,22 @@ class ResultsTable(QTableWidget):
                 row_data.append(item.text() if item else "")
             lines.append("\t".join(row_data))
 
-        from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText("\n".join(lines))
+
+    def _auto_fit_column(self, logical_index: int) -> None:
+        """Auto-fit column width to content on header double-click."""
+        header = self.horizontalHeaderItem(logical_index)
+        header_text = header.text() if header else ""
+        fm = self.fontMetrics()
+        max_width = fm.horizontalAdvance(header_text) + 30
+
+        for row in range(min(self.rowCount(), 1000)):
+            item = self.item(row, logical_index)
+            if item:
+                text_width = fm.horizontalAdvance(item.text()) + 20
+                max_width = max(max_width, text_width)
+
+        self.setColumnWidth(logical_index, max(50, min(max_width, 600)))
 
     def load_results(self, rows: List[Tuple], description: Any) -> None:
         """Load query results into table."""
@@ -379,12 +612,16 @@ class SQLTab(QWidget):
     """Tab widget for SQL editing and execution."""
 
     def __init__(self, connection_name: str, connection: Any,
+                 adapter: Any = None, db_type: str = '',
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         self.connection_name = connection_name
         self.connection = connection
+        self.adapter = adapter
+        self.db_type = db_type
         self._worker: Optional[QueryWorker] = None
+        self._script_worker: Optional[ScriptWorker] = None
         self._current_page = 1
         self._rows_per_page = 1000
         self._total_rows = 0
@@ -392,6 +629,14 @@ class SQLTab(QWidget):
         self._recent_destructive: List[str] = []  # Track last 10 destructive queries
         self._search_matches: List[Tuple[int, int]] = []  # (row, col) pairs
         self._current_search_idx = -1
+        self._columns: List[str] = []
+        self._editable = False
+        self._edit_table: Optional[str] = None
+        self._edit_schema: Optional[str] = None
+        self._pk_columns: List[str] = []
+        self._pk_indices: List[int] = []
+        self._original_values: dict = {}  # row_index -> original row tuple
+        self._modified_cells: dict = {}   # row_index -> {col_index: new_value}
 
         self._setup_ui()
         self._connect_signals()
@@ -441,22 +686,35 @@ class SQLTab(QWidget):
         """Create the toolbar."""
         self.toolbar = QToolBar()
         self.toolbar.setMovable(False)
-        self.toolbar.setIconSize(QSize(16, 16))
+        self.toolbar.setIconSize(QSize(24, 24))
+
+        ic = "#ddd"  # icon color
+        tb_style = Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+
+        def _tb(text, icon_name, icon_color=ic):
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setIcon(_make_icon(icon_name, icon_color, size=24))
+            btn.setToolButtonStyle(tb_style)
+            btn.setAutoRaise(True)
+            return btn
 
         # Execute button
-        self.btn_execute = QPushButton("Execute")
+        self.btn_execute = _tb("Execute", "play", "#fff")
+        self.btn_execute.setProperty("primary", True)
         self.btn_execute.setToolTip("Execute statement at cursor (F5)")
         self.btn_execute.clicked.connect(self.execute_query)
         self.toolbar.addWidget(self.btn_execute)
 
-        # Execute All button
-        self.btn_execute_all = QPushButton("Execute Script")
+        # Execute Script button
+        self.btn_execute_all = _tb("Script", "play_all")
         self.btn_execute_all.setToolTip("Execute all statements (Ctrl+F5)")
         self.btn_execute_all.clicked.connect(self.execute_all)
         self.toolbar.addWidget(self.btn_execute_all)
 
         # Cancel button
-        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel = _tb("Cancel", "stop", "#fff")
+        self.btn_cancel.setProperty("danger", True)
         self.btn_cancel.setToolTip("Cancel query (Esc)")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self.cancel_query)
@@ -465,26 +723,26 @@ class SQLTab(QWidget):
         self.toolbar.addSeparator()
 
         # Save button
-        self.btn_save = QPushButton("Save")
+        self.btn_save = _tb("Save", "save")
         self.btn_save.setToolTip("Save query (Ctrl+S)")
         self.btn_save.clicked.connect(self.save_query)
         self.toolbar.addWidget(self.btn_save)
 
         # Load button
-        self.btn_load = QPushButton("Load")
+        self.btn_load = _tb("Load", "open")
         self.btn_load.setToolTip("Load query (Ctrl+O)")
         self.btn_load.clicked.connect(self.load_query)
         self.toolbar.addWidget(self.btn_load)
 
         # Clear button
-        self.btn_clear = QPushButton("Clear")
+        self.btn_clear = _tb("Clear", "clear")
         self.btn_clear.clicked.connect(self.editor.clear)
         self.toolbar.addWidget(self.btn_clear)
 
         self.toolbar.addSeparator()
 
         # Format button
-        self.btn_format = QPushButton("Format")
+        self.btn_format = _tb("Format", "format")
         self.btn_format.setToolTip("Format SQL (Ctrl+Shift+F)")
         self.btn_format.clicked.connect(self.format_sql)
         self.toolbar.addWidget(self.btn_format)
@@ -575,22 +833,22 @@ class SQLTab(QWidget):
 
         # Pagination buttons
         self.btn_first = QPushButton("◀◀")
-        self.btn_first.setFixedWidth(32)
+        self.btn_first.setFixedWidth(36)
         self.btn_first.clicked.connect(lambda: self._go_to_page(1))
         layout.addWidget(self.btn_first)
 
         self.btn_prev = QPushButton("◀")
-        self.btn_prev.setFixedWidth(32)
+        self.btn_prev.setFixedWidth(30)
         self.btn_prev.clicked.connect(lambda: self._go_to_page(self._current_page - 1))
         layout.addWidget(self.btn_prev)
 
         self.btn_next = QPushButton("▶")
-        self.btn_next.setFixedWidth(32)
+        self.btn_next.setFixedWidth(30)
         self.btn_next.clicked.connect(lambda: self._go_to_page(self._current_page + 1))
         layout.addWidget(self.btn_next)
 
         self.btn_last = QPushButton("▶▶")
-        self.btn_last.setFixedWidth(32)
+        self.btn_last.setFixedWidth(36)
         self.btn_last.clicked.connect(self._go_to_last_page)
         layout.addWidget(self.btn_last)
 
@@ -606,6 +864,19 @@ class SQLTab(QWidget):
         export_menu.addAction("JSON (.json)", lambda: self._export("json"))
         self.btn_export.setMenu(export_menu)
         layout.addWidget(self.btn_export)
+
+        # Save/Discard buttons (hidden until edits exist)
+        self.btn_save_changes = QPushButton("Save Changes")
+        self.btn_save_changes.setProperty("primary", True)
+        self.btn_save_changes.clicked.connect(self._save_changes)
+        self.btn_save_changes.hide()
+        layout.addWidget(self.btn_save_changes)
+
+        self.btn_discard_changes = QPushButton("Discard")
+        self.btn_discard_changes.setProperty("danger", True)
+        self.btn_discard_changes.clicked.connect(self._discard_changes)
+        self.btn_discard_changes.hide()
+        layout.addWidget(self.btn_discard_changes)
 
         layout.addStretch()
 
@@ -675,7 +946,7 @@ class SQLTab(QWidget):
         layout.addStretch()
 
         btn_close = QPushButton("X")
-        btn_close.setFixedWidth(24)
+        btn_close.setFixedWidth(26)
         btn_close.clicked.connect(self._hide_editor_search)
         layout.addWidget(btn_close)
 
@@ -807,6 +1078,10 @@ class SQLTab(QWidget):
         """Connect signals."""
         self.editor.execute_requested.connect(self.execute_query)
         self.editor.execute_all_requested.connect(self.execute_all)
+        self.editor.find_requested.connect(self._toggle_editor_search)
+
+        # Double-click on results to open record viewer
+        self.results_table.doubleClicked.connect(self._on_results_double_click)
 
         # Auto-refresh log when tab changes to Log
         self.results_tabs.currentChanged.connect(self._on_results_tab_changed)
@@ -827,6 +1102,10 @@ class SQLTab(QWidget):
         shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
         shortcut_find.activated.connect(self._toggle_editor_search)
 
+    def has_unsaved_changes(self) -> bool:
+        """Check if this tab has unsaved cell edits."""
+        return bool(self._modified_cells)
+
     def set_sql(self, sql: str) -> None:
         """Set the SQL text."""
         self.editor.setPlainText(sql)
@@ -840,13 +1119,90 @@ class SQLTab(QWidget):
         self._run_query(sql)
 
     def execute_all(self) -> None:
-        """Execute all statements."""
+        """Execute all statements as a script."""
         sql = self.editor.toPlainText().strip()
         if not sql:
             return
 
-        # For now, just run the whole thing
-        self._run_query(sql)
+        statements = self.editor._split_statements(sql)
+        statements = [s for s in statements if s.strip()]
+        if not statements:
+            return
+
+        if self._worker and self._worker.isRunning():
+            return
+
+        self.btn_execute.setEnabled(False)
+        self.btn_execute_all.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self._set_status(f"Executing {len(statements)} statement(s)...")
+
+        self._script_worker = ScriptWorker(self.connection, statements)
+        self._script_worker.all_finished.connect(self._on_script_finished)
+        self._script_worker.error.connect(self._on_query_error)
+        self._script_worker.start()
+
+    def _on_script_finished(self, results: List, total_time: float) -> None:
+        """Handle script execution completion."""
+        self._reset_buttons()
+
+        # Log each statement
+        db = _get_db()
+        for r in results:
+            try:
+                db.log_query(
+                    self.connection_name, r["full_sql"],
+                    duration=r["time"],
+                    row_count=r["row_count"],
+                    status="success" if r["success"] else "error",
+                    error_message=r.get("error")
+                )
+            except Exception:
+                pass
+
+        # Display results in table with script columns
+        self.results_table.clear()
+        self.results_table.setSortingEnabled(False)
+        self.results_table.setColumnCount(4)
+        self.results_table.setHorizontalHeaderLabels(["#", "SQL", "Result", "Time"])
+        self.results_table.setRowCount(len(results))
+
+        for i, r in enumerate(results):
+            self.results_table.setItem(i, 0, QTableWidgetItem(str(r["stmt"])))
+            self.results_table.setItem(i, 1, QTableWidgetItem(r["sql"]))
+            status_item = QTableWidgetItem(r["status"])
+            if not r["success"]:
+                status_item.setForeground(QColor(255, 80, 80))
+            self.results_table.setItem(i, 2, status_item)
+            self.results_table.setItem(i, 3, QTableWidgetItem(f"{r['time']:.3f}s"))
+
+        self.results_table.resizeColumnsToContents()
+        for col in range(self.results_table.columnCount()):
+            if self.results_table.columnWidth(col) > 400:
+                self.results_table.setColumnWidth(col, 400)
+        self.results_table.setSortingEnabled(True)
+
+        # Update statistics
+        success = sum(1 for r in results if r["success"])
+        errors = sum(1 for r in results if not r["success"])
+        stats_lines = [
+            "=" * 60,
+            "SCRIPT EXECUTION RESULTS",
+            "=" * 60,
+            "",
+            f"  Statements:  {len(results)}",
+            f"  Success:     {success}",
+            f"  Errors:      {errors}",
+            f"  Total time:  {total_time:.3f} seconds",
+        ]
+        self.stats_text.setPlainText("\n".join(stats_lines))
+
+        # Update status
+        self.results_status.setText(
+            f"Script: {success} succeeded, {errors} failed ({total_time:.3f}s)")
+        self._set_status(
+            f"Script completed: {len(results)} statement(s)")
+        self.results_tabs.setCurrentIndex(0)
 
     def _run_query(self, sql: str) -> None:
         """Run a query in the background."""
@@ -910,11 +1266,9 @@ class SQLTab(QWidget):
 
         # Start worker
         self._worker = QueryWorker(
-            self.connection,
-            sql,
-            self._rows_per_page,
-            0,
-            self.chk_show_all.isChecked()
+            self.connection, sql, self.adapter,
+            self._rows_per_page, 0,
+            self.chk_show_all.isChecked(), run_count=True
         )
         self._worker.finished.connect(self._on_query_finished)
         self._worker.error.connect(self._on_query_error)
@@ -927,9 +1281,15 @@ class SQLTab(QWidget):
             self._worker.wait()
             self._set_status("Query cancelled")
             self._reset_buttons()
+        if self._script_worker and self._script_worker.isRunning():
+            self._script_worker.cancel()
+            self._script_worker.wait()
+            self._set_status("Script cancelled")
+            self._reset_buttons()
 
     def _on_query_finished(self, rows: List, description: Any,
-                          exec_time: float, fetch_time: float) -> None:
+                          exec_time: float, fetch_time: float,
+                          total_rows: int = 0) -> None:
         """Handle query completion."""
         self._reset_buttons()
 
@@ -946,21 +1306,38 @@ class SQLTab(QWidget):
         except Exception as e:
             print(f"Failed to log query: {e}")
 
-        # Update results
+        # Update results — disconnect cellChanged during load to avoid false edits
+        try:
+            self.results_table.cellChanged.disconnect(self._on_cell_changed)
+        except (TypeError, RuntimeError):
+            pass
+
         self.results_table.load_results(rows, description)
-        self._total_rows = len(rows)
+        self._total_rows = total_rows if total_rows > 0 else len(rows)
+
+        # Store column names for editing
+        self._columns = [col[0] for col in description] if description else []
+
+        # Detect editability
+        self._detect_editability(rows)
 
         # Update fields tab
         self._update_fields(description)
 
-        # Update statistics
-        self._update_statistics(exec_time, fetch_time, len(rows), description)
+        # Get explain info and update statistics
+        explain_info = self._get_explain_info(self._last_sql)
+        self._update_statistics(exec_time, fetch_time, len(rows), description,
+                               total_rows=self._total_rows, explain_info=explain_info)
 
         # Update status
+        edit_status = " [Editable]" if self._editable else ""
         if rows:
+            start = (self._current_page - 1) * self._rows_per_page + 1
+            end = start + len(rows) - 1
             total_pages = max(1, (self._total_rows + self._rows_per_page - 1) // self._rows_per_page)
             self.results_status.setText(
-                f"Showing 1-{len(rows)} of {self._total_rows} row(s) (Page 1 of {total_pages})"
+                f"Showing {start:,}-{end:,} of {self._total_rows:,} row(s) "
+                f"(Page {self._current_page} of {total_pages}){edit_status}"
             )
         else:
             self.results_status.setText("No results")
@@ -1017,19 +1394,38 @@ class SQLTab(QWidget):
             ))
 
     def _update_statistics(self, exec_time: float, fetch_time: float,
-                          row_count: int, description: Any) -> None:
+                          row_count: int, description: Any,
+                          total_rows: int = 0, explain_info: str = None) -> None:
         """Update the statistics tab."""
-        stats = [
-            f"SQL: {self._last_sql[:200]}{'...' if len(self._last_sql) > 200 else ''}",
-            "",
-            f"Execution time: {exec_time:.3f}s",
-            f"Fetch time: {fetch_time:.3f}s",
-            f"Total time: {exec_time + fetch_time:.3f}s",
-            "",
-            f"Rows returned: {row_count}",
-            f"Columns: {len(description) if description else 0}",
-        ]
-        self.stats_text.setPlainText("\n".join(stats))
+        lines = []
+        lines.append("=" * 60)
+        lines.append("QUERY EXECUTION STATISTICS")
+        lines.append("=" * 60)
+        lines.append("")
+        lines.append("TIMING:")
+        lines.append(f"  Execution time: {exec_time:.3f} seconds")
+        lines.append(f"  Fetch time:     {fetch_time:.3f} seconds")
+        lines.append(f"  Total time:     {exec_time + fetch_time:.3f} seconds")
+        lines.append("")
+        lines.append("RESULTS:")
+        if total_rows > row_count:
+            lines.append(f"  Rows fetched:   {row_count:,}")
+            lines.append(f"  Total rows:     {total_rows:,}")
+        else:
+            lines.append(f"  Rows returned:  {row_count:,}")
+        col_count = len(description) if description else 0
+        lines.append(f"  Columns:        {col_count}")
+        lines.append("")
+        lines.append("QUERY:")
+        lines.append("-" * 40)
+        sql = self._last_sql
+        lines.append(sql[:500] + ('...' if len(sql) > 500 else ''))
+        if explain_info:
+            lines.append("")
+            lines.append("INDEX INFORMATION:")
+            lines.append("-" * 40)
+            lines.append(explain_info)
+        self.stats_text.setPlainText("\n".join(lines))
 
     def _set_status(self, message: str) -> None:
         """Set status message."""
@@ -1071,18 +1467,17 @@ class SQLTab(QWidget):
         self._set_status("Loading page...")
 
         self._worker = QueryWorker(
-            self.connection,
-            self._last_sql,
-            self._rows_per_page,
-            offset,
-            False
+            self.connection, self._last_sql, self.adapter,
+            self._rows_per_page, offset,
+            fetch_all=False, run_count=False
         )
         self._worker.finished.connect(self._on_page_loaded)
         self._worker.error.connect(self._on_query_error)
         self._worker.start()
 
     def _on_page_loaded(self, rows: List, description: Any,
-                        exec_time: float, fetch_time: float) -> None:
+                        exec_time: float, fetch_time: float,
+                        total_rows: int = 0) -> None:
         """Handle page load completion."""
         self._reset_buttons()
 
@@ -1118,9 +1513,31 @@ class SQLTab(QWidget):
         self.btn_next.setEnabled(has_results and self._current_page < total_pages)
         self.btn_last.setEnabled(has_results and self._current_page < total_pages)
 
+    def _on_results_double_click(self, index) -> None:
+        """Handle double-click on results table."""
+        if not self._editable and self.results_table.rowCount() > 0:
+            # Collect current results data
+            columns = []
+            for col in range(self.results_table.columnCount()):
+                header = self.results_table.horizontalHeaderItem(col)
+                columns.append(header.text() if header else "")
+
+            rows = []
+            for row in range(self.results_table.rowCount()):
+                row_data = []
+                for col in range(self.results_table.columnCount()):
+                    item = self.results_table.item(row, col)
+                    row_data.append(item.text() if item else "")
+                rows.append(row_data)
+
+            from ..dialogs.record_viewer_dialog import RecordViewerDialog
+            dialog = RecordViewerDialog(self, columns, rows, index.row())
+            dialog.navigate.connect(
+                lambda idx: self.results_table.selectRow(idx))
+            dialog.exec()
+
     def _copy_to_clipboard(self) -> None:
         """Copy results to clipboard."""
-        from PyQt6.QtWidgets import QApplication
 
         rows = []
         # Header
@@ -1370,36 +1787,29 @@ class SQLTab(QWidget):
                 self.editor.setPlainText(sql_item.text())
 
     def save_query(self) -> None:
-        """Save query to file."""
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Query",
-            "",
-            "SQL Files (*.sql);;All Files (*)"
-        )
-        if filename:
+        """Save query to database."""
+        from PyQt6.QtWidgets import QInputDialog
+        sql = self.editor.toPlainText().strip()
+        if not sql:
+            return
+
+        name, ok = QInputDialog.getText(
+            self, "Save Query", "Query name:")
+        if ok and name:
             try:
-                with open(filename, 'w') as f:
-                    f.write(self.editor.toPlainText())
-                self._set_status(f"Saved to {filename}")
+                db = _get_db()
+                db.save_query(name, sql, self.connection_name, self.db_type)
+                self._set_status(f"Saved query: {name}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save: {e}")
 
     def load_query(self) -> None:
-        """Load query from file."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Query",
-            "",
-            "SQL Files (*.sql);;All Files (*)"
-        )
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    self.editor.setPlainText(f.read())
-                self._set_status(f"Loaded {filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load: {e}")
+        """Load query from database."""
+        from ..dialogs.query_manager_dialog import QueryManagerDialog
+        dialog = QueryManagerDialog(self, self.db_type, self.connection_name)
+        if dialog.exec() and dialog.selected_sql:
+            self.editor.setPlainText(dialog.selected_sql)
+            self._set_status("Query loaded")
 
     def format_sql(self) -> None:
         """Format the SQL in the editor."""
@@ -1419,6 +1829,423 @@ class SQLTab(QWidget):
                 "sqlparse module not available"
             )
 
+    # ── Explain / Query Plan ─────────────────────────────────────
+
+    def _get_explain_info(self, sql: str) -> Optional[str]:
+        """Try to get query explain/plan information."""
+        sql_upper = sql.strip().upper()
+        if not sql_upper.startswith("SELECT"):
+            return None
+        if not self.adapter or self.db_type != "ibmi":
+            return None
+
+        explain_data = []
+        try:
+            explain_cursor = self.connection.cursor()
+            try:
+                explain_cursor.execute("CALL QSYS2.OVERRIDE_QAQQINI(1, '', '')")
+            except Exception:
+                pass
+
+            tables = self._extract_tables_from_sql(sql)
+            for table in tables[:5]:
+                try:
+                    idx_cursor = self.connection.cursor()
+                    idx_cursor.execute("""
+                        SELECT INDEX_NAME, COLUMN_NAME, INDEX_TYPE, IS_UNIQUE
+                        FROM QSYS2.SYSINDEXES I
+                        JOIN QSYS2.SYSKEYS K ON I.INDEX_NAME = K.INDEX_NAME
+                            AND I.INDEX_SCHEMA = K.INDEX_SCHEMA
+                        WHERE I.TABLE_NAME = ?
+                        ORDER BY I.INDEX_NAME, K.ORDINAL_POSITION
+                        FETCH FIRST 20 ROWS ONLY
+                    """, (table.upper(),))
+                    indexes = idx_cursor.fetchall()
+                    if indexes:
+                        explain_data.append(f"\nIndexes on {table}:")
+                        current_idx = None
+                        for row in indexes:
+                            idx_name, col_name, idx_type, is_unique = row
+                            if idx_name != current_idx:
+                                unique_str = "UNIQUE " if is_unique == 'Y' else ""
+                                explain_data.append(f"  {unique_str}{idx_name} ({idx_type})")
+                                current_idx = idx_name
+                            explain_data.append(f"    - {col_name}")
+                    idx_cursor.close()
+                except Exception:
+                    pass
+
+            explain_cursor.close()
+        except Exception:
+            pass
+
+        return "\n".join(explain_data) if explain_data else None
+
+    @staticmethod
+    def _extract_tables_from_sql(sql: str) -> List[str]:
+        """Extract table names from SQL (basic parsing)."""
+        tables = []
+        from_match = re.search(
+            r'\bFROM\s+([A-Za-z0-9_.]+(?:/[A-Za-z0-9_]+)?)', sql, re.IGNORECASE)
+        if from_match:
+            table = from_match.group(1)
+            if '/' in table:
+                parts = table.split('/')
+                table = f"{parts[0]}.{parts[1]}"
+            tables.append(table)
+
+        for match in re.findall(
+                r'\bJOIN\s+([A-Za-z0-9_.]+(?:/[A-Za-z0-9_]+)?)', sql, re.IGNORECASE):
+            if '/' in match:
+                parts = match.split('/')
+                match = f"{parts[0]}.{parts[1]}"
+            tables.append(match)
+
+        return tables
+
+    # ── Inline Editing ──────────────────────────────────────────
+
+    @staticmethod
+    def _parse_single_table_select(sql: str):
+        """Parse SQL to detect single-table SELECT. Returns (schema, table) or (None, None)."""
+        sql_clean = sql.strip().rstrip(';')
+        sql_upper = sql_clean.upper()
+
+        if not sql_upper.startswith('SELECT'):
+            return None, None
+
+        for kw in (' JOIN ', ' INNER JOIN ', ' LEFT JOIN ', ' RIGHT JOIN ',
+                    ' OUTER JOIN ', ' CROSS JOIN ', ' NATURAL JOIN '):
+            if kw in sql_upper:
+                return None, None
+
+        if ' UNION ' in sql_upper or ' INTERSECT ' in sql_upper or ' EXCEPT ' in sql_upper:
+            return None, None
+
+        from_pos = sql_upper.find(' FROM ')
+        if from_pos == -1:
+            return None, None
+
+        after_from = sql_upper[from_pos + 6:].lstrip()
+        if after_from.startswith('('):
+            return None, None
+
+        from_match = re.search(
+            r'\bFROM\s+(["\w]+(?:\.["\w]+)?)\s*(?:AS\s+\w+|\w+)?'
+            r'(?:\s+WHERE|\s+ORDER|\s+GROUP|\s+HAVING|\s+LIMIT|\s+FETCH|\s*$)',
+            sql_clean, re.IGNORECASE
+        )
+        if not from_match:
+            from_match = re.search(r'\bFROM\s+(["\w]+(?:\.["\w]+)?)', sql_clean, re.IGNORECASE)
+        if not from_match:
+            return None, None
+
+        table_ref = from_match.group(1)
+
+        where_pos = sql_upper.find(' WHERE ', from_pos)
+        order_pos = sql_upper.find(' ORDER ', from_pos)
+        group_pos = sql_upper.find(' GROUP ', from_pos)
+        end_pos = min(p for p in [where_pos, order_pos, group_pos, len(sql_upper)] if p > 0)
+        from_clause = sql_upper[from_pos + 6:end_pos]
+        if ',' in from_clause:
+            return None, None
+
+        if '.' in table_ref:
+            parts = table_ref.split('.')
+            return parts[0].strip('"').strip("'"), parts[1].strip('"').strip("'")
+        return None, table_ref.strip('"').strip("'")
+
+    def _detect_editability(self, rows) -> None:
+        """Detect if results are editable and set up editing state."""
+        self._editable = False
+        self._edit_table = None
+        self._edit_schema = None
+        self._pk_columns = []
+        self._pk_indices = []
+        self._original_values = {}
+        self._modified_cells = {}
+        self.btn_save_changes.hide()
+        self.btn_discard_changes.hide()
+
+        if not self.adapter or not self._columns:
+            self.results_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers)
+            return
+
+        schema, table = self._parse_single_table_select(self._last_sql)
+        if not table:
+            self.results_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers)
+            return
+
+        try:
+            pk_cols = self.adapter.get_primary_key_columns(
+                self.connection, schema, table)
+        except Exception:
+            pk_cols = []
+
+        if not pk_cols:
+            self.results_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers)
+            return
+
+        columns_upper = [c.upper() for c in self._columns]
+        pk_indices = []
+        for pk_col in pk_cols:
+            try:
+                idx = columns_upper.index(pk_col.upper())
+                pk_indices.append(idx)
+            except ValueError:
+                self.results_table.setEditTriggers(
+                    QAbstractItemView.EditTrigger.NoEditTriggers)
+                return
+
+        self._editable = True
+        self._edit_table = table
+        self._edit_schema = schema
+        self._pk_columns = pk_cols
+        self._pk_indices = pk_indices
+
+        # Store original values
+        for row_idx, row in enumerate(rows):
+            self._original_values[row_idx] = tuple(
+                str(v) if v is not None else "" for v in row)
+
+        # Enable editing, but lock PK columns
+        self.results_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked)
+        for row_idx in range(self.results_table.rowCount()):
+            for pk_idx in pk_indices:
+                item = self.results_table.item(row_idx, pk_idx)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        # Connect cellChanged
+        self.results_table.cellChanged.connect(self._on_cell_changed)
+
+    def _center_dialog(self, dialog) -> None:
+        """Center a dialog on the main window."""
+        win = self.window()
+        fg = win.frameGeometry()
+        # Force layout to get real size, then position before showing
+        dialog.layout().activate()
+        dialog.adjustSize()
+        ds = dialog.sizeHint()
+        x = fg.x() + (fg.width() - ds.width()) // 2
+        y = fg.y() + (fg.height() - ds.height()) // 2
+        dialog.setGeometry(x, y, ds.width(), ds.height())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_Moved, True)
+
+    def _on_cell_changed(self, row: int, col: int) -> None:
+        """Track cell modifications."""
+        if not self._editable or col in self._pk_indices:
+            return
+
+        item = self.results_table.item(row, col)
+        if not item:
+            return
+
+        new_value = item.text()
+        original = self._original_values.get(row)
+        if not original:
+            return
+
+        if new_value == original[col]:
+            # Value reverted — remove from tracked changes
+            if row in self._modified_cells:
+                self._modified_cells[row].pop(col, None)
+                if not self._modified_cells[row]:
+                    del self._modified_cells[row]
+                    # Remove highlight
+                    for c in range(self.results_table.columnCount()):
+                        it = self.results_table.item(row, c)
+                        if it:
+                            it.setBackground(QColor(0, 0, 0, 0))
+        else:
+            if row not in self._modified_cells:
+                self._modified_cells[row] = {}
+            self._modified_cells[row][col] = new_value
+            # Highlight modified row
+            for c in range(self.results_table.columnCount()):
+                it = self.results_table.item(row, c)
+                if it:
+                    it.setBackground(QColor(100, 100, 0, 60))
+
+        # Show/hide save buttons
+        if self._modified_cells:
+            self.btn_save_changes.show()
+            self.btn_discard_changes.show()
+        else:
+            self.btn_save_changes.hide()
+            self.btn_discard_changes.hide()
+
+    def _save_changes(self) -> None:
+        """Save all modified rows to the database."""
+        if not self._modified_cells or not self._editable:
+            return
+
+        num_changes = len(self._modified_cells)
+        conn_info = get_connection(self.connection_name)
+
+        if conn_info and conn_info.get('is_production'):
+            title = "Production Database"
+            text = (f"This is a PRODUCTION connection.\n\n"
+                    f"Save {num_changes} modified row(s) to '{self._edit_table}'?")
+            icon = QMessageBox.Icon.Warning
+        else:
+            title = "Save Changes"
+            text = f"Save {num_changes} modified row(s) to '{self._edit_table}'?"
+            icon = QMessageBox.Icon.Question
+
+        msg = QMessageBox(icon, title, text,
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          self.window())
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        self._center_dialog(msg)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        errors = []
+        success_count = 0
+        db = _get_db()
+
+        for row_idx, changes in list(self._modified_cells.items()):
+            original = self._original_values.get(row_idx)
+            if not original:
+                continue
+            try:
+                sql, params = self._generate_update_sql(changes, original)
+                if sql:
+                    cursor = self.connection.cursor()
+                    start_time = time.time()
+                    cursor.execute(sql, params)
+                    self.connection.commit()
+                    duration = time.time() - start_time
+                    cursor.close()
+                    success_count += 1
+
+                    log_sql = self._format_sql_with_params(sql, params)
+                    db.log_query(self.connection_name, log_sql, duration, 1, "success")
+
+                    # Update original values
+                    current = list(original)
+                    for col_idx, val in changes.items():
+                        current[col_idx] = val
+                    self._original_values[row_idx] = tuple(current)
+
+                    # Remove highlight
+                    for c in range(self.results_table.columnCount()):
+                        it = self.results_table.item(row_idx, c)
+                        if it:
+                            it.setBackground(QColor(0, 0, 0, 0))
+
+            except Exception as e:
+                errors.append(f"Row {row_idx + 1}: {e}")
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+
+        if not errors:
+            self._modified_cells = {}
+        else:
+            # Keep only failed rows
+            self._modified_cells = {k: v for k, v in self._modified_cells.items()
+                                    if any(f"Row {k + 1}:" in e for e in errors)}
+
+        self.btn_save_changes.setVisible(bool(self._modified_cells))
+        self.btn_discard_changes.setVisible(bool(self._modified_cells))
+
+        if errors:
+            QMessageBox.warning(
+                self, "Save Errors",
+                f"Saved {success_count} row(s).\n\nErrors:\n" + "\n".join(errors[:5]))
+        else:
+            self._set_status(f"Saved {success_count} row(s) to {self._edit_table}")
+
+    def _discard_changes(self) -> None:
+        """Discard all unsaved changes."""
+        if not self._modified_cells:
+            return
+
+        msg = QMessageBox(QMessageBox.Icon.Question, "Discard Changes",
+                          f"Discard {len(self._modified_cells)} modified row(s)?",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          self.window())
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        self._center_dialog(msg)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.results_table.cellChanged.disconnect(self._on_cell_changed)
+        except (TypeError, RuntimeError):
+            pass
+
+        for row_idx in list(self._modified_cells.keys()):
+            original = self._original_values.get(row_idx)
+            if original:
+                for col_idx in range(len(original)):
+                    item = self.results_table.item(row_idx, col_idx)
+                    if item:
+                        item.setText(original[col_idx])
+                        item.setBackground(QColor(0, 0, 0, 0))
+
+        self._modified_cells = {}
+        self.btn_save_changes.hide()
+        self.btn_discard_changes.hide()
+        self._set_status("Changes discarded")
+
+        self.results_table.cellChanged.connect(self._on_cell_changed)
+
+    def _generate_update_sql(self, changes: dict, original_values: tuple):
+        """Generate UPDATE SQL for a modified row."""
+        if not changes or not original_values:
+            return None, None
+
+        set_parts = []
+        set_params = []
+        for col_num, new_value in changes.items():
+            col_name = self._columns[col_num]
+            set_parts.append(f"{col_name} = ?")
+            set_params.append(None if new_value == "" else new_value)
+
+        where_parts = []
+        where_params = []
+        for pk_idx in self._pk_indices:
+            pk_col = self._columns[pk_idx]
+            pk_value = original_values[pk_idx]
+            where_parts.append(f"{pk_col} = ?")
+            where_params.append(pk_value)
+
+        table_ref = (f"{self._edit_schema}.{self._edit_table}"
+                     if self._edit_schema else self._edit_table)
+        sql = f"UPDATE {table_ref} SET {', '.join(set_parts)} WHERE {' AND '.join(where_parts)}"
+
+        if self.db_type in ('mysql', 'postgresql'):
+            sql = sql.replace('?', '%s')
+
+        return sql, set_params + where_params
+
+    @staticmethod
+    def _format_sql_with_params(sql: str, params) -> str:
+        """Format SQL with parameter values substituted for logging."""
+        result = sql
+        for param in params:
+            if param is None:
+                val = "NULL"
+            elif isinstance(param, (int, float)):
+                val = str(param)
+            else:
+                val = f"'{str(param).replace(chr(39), chr(39)+chr(39))}'"
+            if '%s' in result:
+                result = result.replace('%s', val, 1)
+            elif '?' in result:
+                result = result.replace('?', val, 1)
+        return result
+
+    # ── End Inline Editing ────────────────────────────────────
+
     def update_theme(self) -> None:
         """Update theme colors."""
         self.editor.update_theme()
@@ -1432,3 +2259,6 @@ class SQLTab(QWidget):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait()
+        if self._script_worker and self._script_worker.isRunning():
+            self._script_worker.cancel()
+            self._script_worker.wait()

@@ -43,6 +43,8 @@ class MainWindow(QMainWindow):
 
         # Track active connections
         self._connections: Dict[str, Any] = {}
+        self._adapters: Dict[str, Any] = {}
+        self._db_types: Dict[str, str] = {}
 
         # Build UI
         self._create_actions()
@@ -217,6 +219,40 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close."""
+        # Check for unsaved changes in any SQL tab
+        unsaved_tabs = []
+        for i in range(self.tab_container.count()):
+            tab = self.tab_container.widget(i)
+            if hasattr(tab, 'has_unsaved_changes') and tab.has_unsaved_changes():
+                unsaved_tabs.append(self.tab_container.tabText(i))
+
+        if unsaved_tabs:
+            msg = QMessageBox(
+                QMessageBox.Icon.Warning, "Unsaved Changes",
+                f"You have unsaved changes in: {', '.join(unsaved_tabs)}",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                self)
+            msg.setDefaultButton(QMessageBox.StandardButton.Save)
+            msg.layout().activate()
+            msg.adjustSize()
+            fg = self.frameGeometry()
+            ds = msg.sizeHint()
+            msg.setGeometry(
+                fg.x() + (fg.width() - ds.width()) // 2,
+                fg.y() + (fg.height() - ds.height()) // 2,
+                ds.width(), ds.height(),
+            )
+            msg.setAttribute(Qt.WidgetAttribute.WA_Moved, True)
+            result = msg.exec()
+            if result == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if result == QMessageBox.StandardButton.Save:
+                for i in range(self.tab_container.count()):
+                    tab = self.tab_container.widget(i)
+                    if hasattr(tab, 'has_unsaved_changes') and tab.has_unsaved_changes():
+                        tab._save_changes()
+
         self._save_state()
 
         # Close all connections
@@ -299,14 +335,13 @@ class MainWindow(QMainWindow):
 
         connection = self._connections.get(connection_name)
         if connection:
-            tab = SQLTab(connection_name, connection, self)
+            adapter = self._adapters.get(connection_name)
+            db_type = self._db_types.get(connection_name, '')
+            tab = SQLTab(connection_name, connection, adapter, db_type, self)
             index = self.tab_container.add_tab(tab, f"{connection_name} SQL")
 
             # Set tab icon based on database type
-            conn_info = get_connection(connection_name)
-            if conn_info:
-                db_type = conn_info.get('db_type', '')
-                self.tab_container.setTabIcon(index, get_db_icon(db_type))
+            self.tab_container.setTabIcon(index, get_db_icon(db_type))
 
             self.theme_changed.connect(tab.update_theme)
 
@@ -334,14 +369,13 @@ class MainWindow(QMainWindow):
 
         connection = self._connections.get(connection_name)
         if connection:
-            tab = SQLTab(connection_name, connection, self)
+            adapter = self._adapters.get(connection_name)
+            db_type = self._db_types.get(connection_name, '')
+            tab = SQLTab(connection_name, connection, adapter, db_type, self)
             index = self.tab_container.add_tab(tab, f"{connection_name} SQL")
 
             # Set tab icon based on database type
-            conn_info = get_connection(connection_name)
-            if conn_info:
-                db_type = conn_info.get('db_type', '')
-                self.tab_container.setTabIcon(index, get_db_icon(db_type))
+            self.tab_container.setTabIcon(index, get_db_icon(db_type))
 
             self.theme_changed.connect(tab.update_theme)
 
@@ -400,6 +434,8 @@ class MainWindow(QMainWindow):
             )
 
             self._connections[connection_name] = connection
+            self._adapters[connection_name] = adapter
+            self._db_types[connection_name] = conn_info['db_type']
             self.connection_tree.set_connected(connection_name, True)
             self.status_bar.showMessage(f"Connected to {connection_name}", 3000)
             return True
@@ -421,6 +457,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             del self._connections[connection_name]
+            self._adapters.pop(connection_name, None)
+            self._db_types.pop(connection_name, None)
             self.connection_tree.set_connected(connection_name, False)
             self.status_bar.showMessage(f"Disconnected from {connection_name}", 3000)
 

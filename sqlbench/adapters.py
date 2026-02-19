@@ -324,6 +324,7 @@ class MySQLAdapter(DBAdapter):
             'user': user,
             'password': password,
             'database': database or '',
+            'buffered': True,
         }
         if port:
             config['port'] = int(port)
