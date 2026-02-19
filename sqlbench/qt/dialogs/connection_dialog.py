@@ -31,7 +31,7 @@ from ...database import (
     save_connection,
     delete_connection,
 )
-from ...adapters import get_available_adapters, get_adapter
+from ...adapters import get_available_adapters, get_adapter, ADAPTERS
 
 
 class ConnectionDialog(QDialog):
@@ -122,7 +122,7 @@ class ConnectionDialog(QDialog):
         self.txt_name.setPlaceholderText("Connection name")
         form_layout.addRow("Name:", self.txt_name)
 
-        # Type
+        # Type + Install button
         self.cmb_type = QComboBox()
         adapters = get_available_adapters()
         for adapter_name, available in adapters.items():
@@ -131,7 +131,15 @@ class ConnectionDialog(QDialog):
                 display += " (not installed)"
             self.cmb_type.addItem(display, adapter_name)
         self.cmb_type.currentIndexChanged.connect(self._on_type_changed)
-        form_layout.addRow("Type:", self.cmb_type)
+
+        self.btn_install_driver = QPushButton("Install Driver")
+        self.btn_install_driver.setVisible(False)
+        self.btn_install_driver.clicked.connect(self._install_driver)
+
+        type_row = QHBoxLayout()
+        type_row.addWidget(self.cmb_type, 1)
+        type_row.addWidget(self.btn_install_driver)
+        form_layout.addRow("Type:", type_row)
 
         # Host
         self.txt_host = QLineEdit()
@@ -285,6 +293,77 @@ class ConnectionDialog(QDialog):
         self.txt_database.setVisible(not is_ibmi)
         self.lbl_port.setVisible(not is_ibmi)
         self.lbl_database.setVisible(not is_ibmi)
+
+        # Show install button if driver not available
+        adapters = get_available_adapters()
+        self.btn_install_driver.setVisible(not adapters.get(db_type, True))
+
+    def _install_driver(self) -> None:
+        """Install the selected database driver."""
+        import subprocess
+        import sys
+        import threading
+
+        db_type = self.cmb_type.currentData()
+        adapter_cls = ADAPTERS.get(db_type)
+        if not adapter_cls or not adapter_cls.install_hint:
+            return
+
+        # Extract package spec from hint (e.g. "pip install sqlbench[mysql]" -> "sqlbench[mysql]")
+        hint = adapter_cls.install_hint
+        pkg = hint.split("pip install ")[-1] if "pip install " in hint else None
+        if not pkg:
+            return
+
+        self.btn_install_driver.setEnabled(False)
+        self.btn_install_driver.setText("Installing...")
+
+        def do_install():
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", pkg],
+                    capture_output=True, text=True)
+                from PyQt6.QtCore import QTimer
+                if result.returncode == 0:
+                    QTimer.singleShot(0, self._on_driver_installed)
+                else:
+                    error = result.stderr or result.stdout or "Unknown error"
+                    QTimer.singleShot(0, lambda: self._on_driver_install_failed(error))
+            except Exception as e:
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self._on_driver_install_failed(str(e)))
+
+        threading.Thread(target=do_install, daemon=True).start()
+
+    def _on_driver_installed(self) -> None:
+        """Handle successful driver installation."""
+        self.btn_install_driver.setText("Install Driver")
+        self.btn_install_driver.setEnabled(True)
+
+        # Refresh the type dropdown
+        current_data = self.cmb_type.currentData()
+        self.cmb_type.clear()
+        adapters = get_available_adapters()
+        for adapter_name, available in adapters.items():
+            display = adapter_name
+            if not available:
+                display += " (not installed)"
+            self.cmb_type.addItem(display, adapter_name)
+
+        # Re-select the same type
+        for i in range(self.cmb_type.count()):
+            if self.cmb_type.itemData(i) == current_data:
+                self.cmb_type.setCurrentIndex(i)
+                break
+
+        QMessageBox.information(self, "Driver Installed",
+                                "Driver installed successfully. You can now connect.")
+
+    def _on_driver_install_failed(self, error: str) -> None:
+        """Handle failed driver installation."""
+        self.btn_install_driver.setText("Install Driver")
+        self.btn_install_driver.setEnabled(True)
+        QMessageBox.warning(self, "Install Failed", f"Failed to install driver:\n{error}")
 
     def _new_connection(self) -> None:
         """Create a new connection."""
