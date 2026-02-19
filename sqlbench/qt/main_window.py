@@ -5,6 +5,8 @@ Provides the primary interface with menu bar, connection tree,
 and tabbed query/spool interface.
 """
 
+import subprocess
+import threading
 from typing import Optional, Dict, Any
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QCloseEvent
@@ -57,6 +59,9 @@ class MainWindow(QMainWindow):
 
         # Connect theme change signal
         self.theme_changed.connect(self._on_theme_changed)
+
+        # Check for updates after startup
+        QTimer.singleShot(500, self._check_for_updates)
 
     def _create_actions(self) -> None:
         """Create menu actions."""
@@ -153,10 +158,16 @@ class MainWindow(QMainWindow):
                 (screen.height() - self.height()) // 2
             )
 
-        # Restore splitter sizes
-        splitter_sizes = settings.value("splitter_sizes")
-        if splitter_sizes:
-            self.splitter.setSizes([int(s) for s in splitter_sizes])
+        # Restore main splitter from ratio
+        ratio_str = get_setting("layout_main_ratio")
+        if ratio_str:
+            try:
+                ratio = float(ratio_str)
+                if 0.05 <= ratio <= 0.95:
+                    total = self.width()
+                    self.splitter.setSizes([int(ratio * total), int((1 - ratio) * total)])
+            except (ValueError, TypeError):
+                pass
 
         # Restore connections and tabs after window is shown
         QTimer.singleShot(100, self._restore_session)
@@ -187,11 +198,40 @@ class MainWindow(QMainWindow):
         except Exception:
             pass  # Ignore errors restoring tabs
 
+        # Restore per-tab splitter ratios
+        self._restore_tab_layouts()
+
+        # Auto-connect last used connection
+        last_conn = get_setting("last_connection")
+        if last_conn and last_conn not in self._connections:
+            conn_info = get_connection(last_conn)
+            if conn_info:
+                self._connect(last_conn)
+
     def _save_state(self) -> None:
         """Save window geometry and state."""
         settings = QSettings("SQLBench", "SQLBench")
         settings.setValue("geometry", self.saveGeometry())
-        settings.setValue("splitter_sizes", self.splitter.sizes())
+
+        # Save main splitter as ratio
+        sizes = self.splitter.sizes()
+        total = sum(sizes)
+        if total > 100:
+            ratio = sizes[0] / total
+            set_setting("layout_main_ratio", f"{ratio:.4f}")
+
+        # Save per-tab splitter ratios (one SQL, one spool)
+        for i in range(self.tab_container.count()):
+            tab = self.tab_container.widget(i)
+            if hasattr(tab, 'splitter'):
+                tab_sizes = tab.splitter.sizes()
+                tab_total = sum(tab_sizes)
+                if tab_total > 100:
+                    tab_ratio = tab_sizes[0] / tab_total
+                    if hasattr(tab, 'refresh_files'):
+                        set_setting("layout_spool_ratio", f"{tab_ratio:.4f}")
+                    else:
+                        set_setting("layout_sql_ratio", f"{tab_ratio:.4f}")
 
         # Save dark mode preference
         set_setting("dark_mode", "1" if Theme.is_dark() else "0")
@@ -301,6 +341,29 @@ class MainWindow(QMainWindow):
         set_setting("font_size", "13")
         self.status_bar.showMessage("Layout reset to defaults", 3000)
 
+    def _restore_tab_layouts(self) -> None:
+        """Restore per-tab splitter ratios."""
+        sql_ratio_str = get_setting("layout_sql_ratio")
+        spool_ratio_str = get_setting("layout_spool_ratio")
+
+        for i in range(self.tab_container.count()):
+            tab = self.tab_container.widget(i)
+            if not hasattr(tab, 'splitter'):
+                continue
+            try:
+                if hasattr(tab, 'refresh_files') and spool_ratio_str:
+                    ratio = float(spool_ratio_str)
+                elif sql_ratio_str:
+                    ratio = float(sql_ratio_str)
+                else:
+                    continue
+                if 0.1 <= ratio <= 0.9:
+                    total = sum(tab.splitter.sizes()) or tab.height()
+                    if total > 100:
+                        tab.splitter.setSizes([int(ratio * total), int((1 - ratio) * total)])
+            except (ValueError, TypeError):
+                pass
+
     def _show_about(self) -> None:
         """Show about dialog."""
         from ..version import __version__
@@ -390,9 +453,12 @@ class MainWindow(QMainWindow):
     def _on_edit_connection(self, connection_name: Optional[str] = None) -> None:
         """Show connection editor dialog."""
         from .dialogs.connection_dialog import ConnectionDialog
+        old_name = connection_name
         dialog = ConnectionDialog(self, connection_name)
         if dialog.exec():
             self.connection_tree.load_connections()
+            if old_name:
+                self._update_tab_names(old_name)
 
     def _on_new_connection(self) -> None:
         """Create new connection."""
@@ -437,6 +503,7 @@ class MainWindow(QMainWindow):
             self._adapters[connection_name] = adapter
             self._db_types[connection_name] = conn_info['db_type']
             self.connection_tree.set_connected(connection_name, True)
+            set_setting("last_connection", connection_name)
             self.status_bar.showMessage(f"Connected to {connection_name}", 3000)
             return True
 
@@ -461,6 +528,104 @@ class MainWindow(QMainWindow):
             self._db_types.pop(connection_name, None)
             self.connection_tree.set_connected(connection_name, False)
             self.status_bar.showMessage(f"Disconnected from {connection_name}", 3000)
+
+    def _update_tab_names(self, old_name: str) -> None:
+        """Update tab names if a connection was renamed."""
+        # Check if old name still exists — if so, no rename happened
+        conn = get_connection(old_name)
+        if conn:
+            return
+
+        if old_name not in self._connections:
+            return
+
+        # Find the new name: look for a connection name we don't recognize
+        known_names = set(self._connections.keys())
+        new_name = None
+        for c in get_connections():
+            if c['name'] not in known_names:
+                new_name = c['name']
+                break
+
+        if not new_name or new_name == old_name:
+            return
+
+        # Update connections dict
+        self._connections[new_name] = self._connections.pop(old_name)
+        if old_name in self._adapters:
+            self._adapters[new_name] = self._adapters.pop(old_name)
+        if old_name in self._db_types:
+            self._db_types[new_name] = self._db_types.pop(old_name)
+
+        # Update all tabs
+        for i in range(self.tab_container.count()):
+            tab = self.tab_container.widget(i)
+            if hasattr(tab, 'connection_name') and tab.connection_name == old_name:
+                tab.connection_name = new_name
+                tab.connection = self._connections[new_name]
+                current_text = self.tab_container.tabText(i)
+                new_text = current_text.replace(old_name, new_name)
+                self.tab_container.setTabText(i, new_text)
+                if hasattr(tab, 'lbl_connection'):
+                    tab.lbl_connection.setText(new_name)
+
+        # Update last_connection if it was the renamed one
+        if get_setting("last_connection") == old_name:
+            set_setting("last_connection", new_name)
+
+        self.connection_tree.set_connected(new_name, True)
+        self.status_bar.showMessage(f"Renamed: {old_name} → {new_name}", 3000)
+
+    def _check_for_updates(self) -> None:
+        """Check for updates in background."""
+        from ..version import check_for_updates
+
+        def on_result(has_update, latest_version):
+            if has_update:
+                QTimer.singleShot(0, lambda: self._show_update_dialog(latest_version))
+
+        check_for_updates(on_result)
+
+    def _show_update_dialog(self, latest_version: str) -> None:
+        """Show update available dialog."""
+        from ..version import __version__
+        result = QMessageBox.question(
+            self, "Update Available",
+            f"A new version of SQLBench is available.\n\n"
+            f"Installed: {__version__}\n"
+            f"Latest: {latest_version}\n\n"
+            f"Would you like to upgrade now?\n\n"
+            f"(This will run: pipx upgrade sqlbench)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if result == QMessageBox.StandardButton.Yes:
+            self._run_upgrade()
+
+    def _run_upgrade(self) -> None:
+        """Run pipx upgrade in background."""
+        def do_upgrade():
+            try:
+                result = subprocess.run(
+                    ["pipx", "upgrade", "sqlbench"],
+                    capture_output=True, text=True)
+                if result.returncode == 0:
+                    QTimer.singleShot(0, lambda: QMessageBox.information(
+                        self, "Upgrade Complete",
+                        "SQLBench has been upgraded.\nPlease restart to use the new version."))
+                else:
+                    error = result.stderr or result.stdout or "Unknown error"
+                    QTimer.singleShot(0, lambda: QMessageBox.warning(
+                        self, "Upgrade Failed", f"Failed to upgrade:\n{error}"))
+            except FileNotFoundError:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "Upgrade Failed",
+                    "pipx not found. Please upgrade manually:\n\npipx upgrade sqlbench"))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "Upgrade Failed", f"Failed to upgrade:\n{e}"))
+
+        self.status_bar.showMessage("Upgrading SQLBench...")
+        thread = threading.Thread(target=do_upgrade, daemon=True)
+        thread.start()
 
     def set_status(self, message: str, timeout: int = 0) -> None:
         """Set status bar message."""

@@ -637,6 +637,7 @@ class SQLTab(QWidget):
         self._pk_indices: List[int] = []
         self._original_values: dict = {}  # row_index -> original row tuple
         self._modified_cells: dict = {}   # row_index -> {col_index: new_value}
+        self._loading_results = False      # guard flag to ignore cellChanged during loads
 
         self._setup_ui()
         self._connect_signals()
@@ -1080,6 +1081,9 @@ class SQLTab(QWidget):
         self.editor.execute_all_requested.connect(self.execute_all)
         self.editor.find_requested.connect(self._toggle_editor_search)
 
+        # Track cell edits (guarded by _loading_results flag)
+        self.results_table.cellChanged.connect(self._on_cell_changed)
+
         # Double-click on results to open record viewer
         self.results_table.doubleClicked.connect(self._on_results_double_click)
 
@@ -1161,6 +1165,7 @@ class SQLTab(QWidget):
                 pass
 
         # Display results in table with script columns
+        self._loading_results = True
         self.results_table.clear()
         self.results_table.setSortingEnabled(False)
         self.results_table.setColumnCount(4)
@@ -1181,6 +1186,7 @@ class SQLTab(QWidget):
             if self.results_table.columnWidth(col) > 400:
                 self.results_table.setColumnWidth(col, 400)
         self.results_table.setSortingEnabled(True)
+        self._loading_results = False
 
         # Update statistics
         success = sum(1 for r in results if r["success"])
@@ -1306,11 +1312,8 @@ class SQLTab(QWidget):
         except Exception as e:
             print(f"Failed to log query: {e}")
 
-        # Update results — disconnect cellChanged during load to avoid false edits
-        try:
-            self.results_table.cellChanged.disconnect(self._on_cell_changed)
-        except (TypeError, RuntimeError):
-            pass
+        # Guard against false edits during programmatic table updates
+        self._loading_results = True
 
         self.results_table.load_results(rows, description)
         self._total_rows = total_rows if total_rows > 0 else len(rows)
@@ -1345,8 +1348,11 @@ class SQLTab(QWidget):
         # Update pagination buttons
         self._update_pagination_buttons()
 
-        # Reconnect cellChanged now that all loading is done
-        self.results_table.cellChanged.connect(self._on_cell_changed)
+        # Allow cellChanged tracking now that all loading is done
+        self._loading_results = False
+
+        # Update main status bar
+        self._set_status(self.results_status.text())
 
         # Switch to results tab
         self.results_tabs.setCurrentIndex(0)
@@ -1484,14 +1490,9 @@ class SQLTab(QWidget):
         """Handle page load completion."""
         self._reset_buttons()
 
-        try:
-            self.results_table.cellChanged.disconnect(self._on_cell_changed)
-        except (TypeError, RuntimeError):
-            pass
-
+        self._loading_results = True
         self.results_table.load_results(rows, description)
-
-        self.results_table.cellChanged.connect(self._on_cell_changed)
+        self._loading_results = False
 
         # Update status with pagination info
         start = (self._current_page - 1) * self._rows_per_page + 1
@@ -2030,7 +2031,7 @@ class SQLTab(QWidget):
                 if item:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
-        # Note: cellChanged is reconnected by the caller after all loading is done
+        # cellChanged is always connected; _loading_results flag guards against false edits
 
     def _center_dialog(self, dialog) -> None:
         """Center a dialog on the main window."""
@@ -2047,6 +2048,8 @@ class SQLTab(QWidget):
 
     def _on_cell_changed(self, row: int, col: int) -> None:
         """Track cell modifications."""
+        if self._loading_results:
+            return
         if not self._editable or col in self._pk_indices:
             return
 
@@ -2186,10 +2189,7 @@ class SQLTab(QWidget):
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
-        try:
-            self.results_table.cellChanged.disconnect(self._on_cell_changed)
-        except (TypeError, RuntimeError):
-            pass
+        self._loading_results = True
 
         for row_idx in list(self._modified_cells.keys()):
             original = self._original_values.get(row_idx)
@@ -2205,7 +2205,7 @@ class SQLTab(QWidget):
         self.btn_discard_changes.hide()
         self._set_status("Changes discarded")
 
-        self.results_table.cellChanged.connect(self._on_cell_changed)
+        self._loading_results = False
 
     def _generate_update_sql(self, changes: dict, original_values: tuple):
         """Generate UPDATE SQL for a modified row."""
@@ -2258,10 +2258,6 @@ class SQLTab(QWidget):
     def update_theme(self) -> None:
         """Update theme colors."""
         self.editor.update_theme()
-
-    def has_unsaved_changes(self) -> bool:
-        """Check for unsaved changes."""
-        return bool(self.editor.toPlainText().strip())
 
     def cleanup(self) -> None:
         """Clean up resources."""
