@@ -118,7 +118,7 @@ def run_tkinter():
 
 def main():
     """Main entry point with argument handling."""
-    use_qt = False
+    use_qt = True
 
     # Process arguments
     args = sys.argv[1:]
@@ -153,7 +153,7 @@ def main():
             print()
             print("Run without arguments to start the application.")
             print()
-            print("By default, uses tkinter. Use --qt for the new PyQt6 interface.")
+            print("By default, uses PyQt6. Use --tk for the classic tkinter interface.")
             sys.exit(0)
         else:
             remaining_args.append(arg)
