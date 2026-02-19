@@ -1345,6 +1345,9 @@ class SQLTab(QWidget):
         # Update pagination buttons
         self._update_pagination_buttons()
 
+        # Reconnect cellChanged now that all loading is done
+        self.results_table.cellChanged.connect(self._on_cell_changed)
+
         # Switch to results tab
         self.results_tabs.setCurrentIndex(0)
 
@@ -1481,7 +1484,14 @@ class SQLTab(QWidget):
         """Handle page load completion."""
         self._reset_buttons()
 
+        try:
+            self.results_table.cellChanged.disconnect(self._on_cell_changed)
+        except (TypeError, RuntimeError):
+            pass
+
         self.results_table.load_results(rows, description)
+
+        self.results_table.cellChanged.connect(self._on_cell_changed)
 
         # Update status with pagination info
         start = (self._current_page - 1) * self._rows_per_page + 1
@@ -2020,8 +2030,7 @@ class SQLTab(QWidget):
                 if item:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
-        # Connect cellChanged
-        self.results_table.cellChanged.connect(self._on_cell_changed)
+        # Note: cellChanged is reconnected by the caller after all loading is done
 
     def _center_dialog(self, dialog) -> None:
         """Center a dialog on the main window."""

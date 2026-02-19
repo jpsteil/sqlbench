@@ -48,6 +48,8 @@ class ConnectionTreeWidget(QWidget):
         self._connected: Dict[str, bool] = {}
         self._loaded_schemas: Dict[str, bool] = {}
         self._pending_expand: Optional[QTreeWidgetItem] = None
+        self._loading_tables: set = set()
+        self._loading_fields: set = set()
 
         self._setup_ui()
         self._setup_context_menu()
@@ -247,13 +249,19 @@ class ConnectionTreeWidget(QWidget):
 
     def _load_schemas(self, item: QTreeWidgetItem, connection_name: str) -> None:
         """Load schemas and tables for a connection."""
+        if connection_name in self._loading_tables:
+            return
+        self._loading_tables.add(connection_name)
+
         # Get main window to access connection
         main_window = self.window()
         if not hasattr(main_window, 'get_connection'):
+            self._loading_tables.discard(connection_name)
             return
 
         connection = main_window.get_connection(connection_name)
         if not connection:
+            self._loading_tables.discard(connection_name)
             return
 
         conn_info = self._connections_info.get(connection_name, {})
@@ -314,11 +322,13 @@ class ConnectionTreeWidget(QWidget):
                 item.addChild(schema_item)
 
             self._loaded_schemas[connection_name] = True
+            self._loading_tables.discard(connection_name)
 
         except Exception as e:
             item.takeChildren()
             error_item = QTreeWidgetItem([f"Error: {str(e)[:50]}"])
             item.addChild(error_item)
+            self._loading_tables.discard(connection_name)
 
     def _load_tables(self, schema_item: QTreeWidgetItem) -> None:
         """Load tables for a schema.
@@ -335,12 +345,19 @@ class ConnectionTreeWidget(QWidget):
         schema_name = data.get('schema')
         table_name = data.get('table')
 
+        field_key = f"{connection_name}::{schema_name}.{table_name}"
+        if field_key in self._loading_fields:
+            return
+        self._loading_fields.add(field_key)
+
         main_window = self.window()
         if not hasattr(main_window, 'get_connection'):
+            self._loading_fields.discard(field_key)
             return
 
         connection = main_window.get_connection(connection_name)
         if not connection:
+            self._loading_fields.discard(field_key)
             return
 
         conn_info = self._connections_info.get(connection_name, {})
@@ -386,10 +403,15 @@ class ConnectionTreeWidget(QWidget):
 
                 table_item.addChild(col_item)
 
+            # Update table node text with column count
+            table_item.setText(0, f"{table_name} ({len(columns)})")
+            self._loading_fields.discard(field_key)
+
         except Exception as e:
             table_item.takeChildren()
             error_item = QTreeWidgetItem([f"Error: {str(e)[:50]}"])
             table_item.addChild(error_item)
+            self._loading_fields.discard(field_key)
 
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text change."""
