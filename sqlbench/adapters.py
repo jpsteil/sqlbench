@@ -117,7 +117,9 @@ class IBMiAdapter(DBAdapter):
             f"UID={user};"
             f"PWD={password};"
         )
-        return pyodbc.connect(conn_str)
+        conn = pyodbc.connect(conn_str)
+        conn.autocommit = True
+        return conn
 
     def get_version(self, conn):
         try:
@@ -328,7 +330,9 @@ class MySQLAdapter(DBAdapter):
         }
         if port:
             config['port'] = int(port)
-        return mysql.connector.connect(**config)
+        conn = mysql.connector.connect(**config)
+        conn.autocommit = True
+        return conn
 
     def get_version(self, conn):
         try:
@@ -476,13 +480,15 @@ class PostgreSQLAdapter(DBAdapter):
 
     def connect(self, host, user, password, port=None, database=None):
         import psycopg2
-        return psycopg2.connect(
+        conn = psycopg2.connect(
             host=host,
             user=user,
             password=password,
             dbname=database or 'postgres',
             port=port or 5432
         )
+        conn.autocommit = True
+        return conn
 
     def get_version_query(self):
         return "SELECT version()"
@@ -682,3 +688,14 @@ def get_available_adapters():
     Returns dict of {db_type: is_available}.
     """
     return {key: cls.is_available() for key, cls in ADAPTERS.items()}
+
+
+def connect_from_info(adapter, conn_info):
+    """Create a database connection from an adapter and connection info dict."""
+    return adapter.connect(
+        host=conn_info['host'],
+        port=conn_info.get('port'),
+        database=conn_info.get('database'),
+        user=conn_info['user'],
+        password=conn_info['password']
+    )

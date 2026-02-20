@@ -43,8 +43,8 @@ class MainWindow(QMainWindow):
         Theme.set_dark(dark_mode)
         Theme.apply(QApplication.instance())
 
-        # Track active connections
-        self._connections: Dict[str, Any] = {}
+        # Track active connections (credentials only, no persistent connection objects)
+        self._conn_infos: Dict[str, Dict] = {}
         self._adapters: Dict[str, Any] = {}
         self._db_types: Dict[str, str] = {}
 
@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
 
         # Auto-connect last used connection
         last_conn = get_setting("last_connection")
-        if last_conn and last_conn not in self._connections:
+        if last_conn and last_conn not in self._conn_infos:
             conn_info = get_connection(last_conn)
             if conn_info:
                 self._connect(last_conn)
@@ -294,14 +294,6 @@ class MainWindow(QMainWindow):
                         tab._save_changes()
 
         self._save_state()
-
-        # Close all connections
-        for conn in self._connections.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-
         event.accept()
 
     def _toggle_dark_mode(self) -> None:
@@ -392,15 +384,15 @@ class MainWindow(QMainWindow):
         """Create new SQL tab for connection."""
         from .tabs.sql_tab import SQLTab
 
-        # Get or create connection
-        if connection_name not in self._connections:
+        # Ensure connection is activated
+        if connection_name not in self._conn_infos:
             self._connect(connection_name)
 
-        connection = self._connections.get(connection_name)
-        if connection:
+        conn_info = self._conn_infos.get(connection_name)
+        if conn_info:
             adapter = self._adapters.get(connection_name)
             db_type = self._db_types.get(connection_name, '')
-            tab = SQLTab(connection_name, connection, adapter, db_type, self)
+            tab = SQLTab(connection_name, conn_info, adapter, db_type, self)
             index = self.tab_container.add_tab(tab, f"{connection_name} SQL")
 
             # Set tab icon based on database type
@@ -412,12 +404,13 @@ class MainWindow(QMainWindow):
         """Create new spool tab for IBM i connection."""
         from .tabs.spool_tab import SpoolTab
 
-        if connection_name not in self._connections:
+        if connection_name not in self._conn_infos:
             self._connect(connection_name)
 
-        connection = self._connections.get(connection_name)
-        if connection:
-            tab = SpoolTab(connection_name, connection, self)
+        conn_info = self._conn_infos.get(connection_name)
+        if conn_info:
+            adapter = self._adapters.get(connection_name)
+            tab = SpoolTab(connection_name, conn_info, adapter, self)
             index = self.tab_container.add_tab(tab, f"{connection_name} Spool")
 
             # IBM i spool tab - set icon
@@ -427,14 +420,14 @@ class MainWindow(QMainWindow):
         """Show first 1000 rows of a table."""
         from .tabs.sql_tab import SQLTab
 
-        if connection_name not in self._connections:
+        if connection_name not in self._conn_infos:
             self._connect(connection_name)
 
-        connection = self._connections.get(connection_name)
-        if connection:
+        conn_info = self._conn_infos.get(connection_name)
+        if conn_info:
             adapter = self._adapters.get(connection_name)
             db_type = self._db_types.get(connection_name, '')
-            tab = SQLTab(connection_name, connection, adapter, db_type, self)
+            tab = SQLTab(connection_name, conn_info, adapter, db_type, self)
             index = self.tab_container.add_tab(tab, f"{connection_name} SQL")
 
             # Set tab icon based on database type
@@ -465,9 +458,9 @@ class MainWindow(QMainWindow):
         self._on_edit_connection(None)
 
     def _connect(self, connection_name: str) -> bool:
-        """Establish connection to database."""
+        """Verify connection credentials and activate connection."""
         from ..database import get_connection
-        from ..adapters import get_adapter
+        from ..adapters import get_adapter, connect_from_info
 
         try:
             conn_info = get_connection(connection_name)
@@ -491,15 +484,12 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Connecting to {connection_name}...")
             QApplication.processEvents()
 
-            connection = adapter.connect(
-                host=conn_info['host'],
-                port=conn_info.get('port'),
-                database=conn_info.get('database'),
-                user=conn_info['user'],
-                password=conn_info['password']
-            )
+            # Test connection then close immediately
+            test_conn = connect_from_info(adapter, conn_info)
+            test_conn.close()
 
-            self._connections[connection_name] = connection
+            # Store credentials (no persistent connection)
+            self._conn_infos[connection_name] = conn_info
             self._adapters[connection_name] = adapter
             self._db_types[connection_name] = conn_info['db_type']
             self.connection_tree.set_connected(connection_name, True)
@@ -517,17 +507,12 @@ class MainWindow(QMainWindow):
             return False
 
     def disconnect(self, connection_name: str) -> None:
-        """Disconnect from database."""
-        if connection_name in self._connections:
-            try:
-                self._connections[connection_name].close()
-            except Exception:
-                pass
-            del self._connections[connection_name]
-            self._adapters.pop(connection_name, None)
-            self._db_types.pop(connection_name, None)
-            self.connection_tree.set_connected(connection_name, False)
-            self.status_bar.showMessage(f"Disconnected from {connection_name}", 3000)
+        """Deactivate connection."""
+        self._conn_infos.pop(connection_name, None)
+        self._adapters.pop(connection_name, None)
+        self._db_types.pop(connection_name, None)
+        self.connection_tree.set_connected(connection_name, False)
+        self.status_bar.showMessage(f"Disconnected from {connection_name}", 3000)
 
     def _update_tab_names(self, old_name: str) -> None:
         """Update tab names if a connection was renamed."""
@@ -536,11 +521,11 @@ class MainWindow(QMainWindow):
         if conn:
             return
 
-        if old_name not in self._connections:
+        if old_name not in self._conn_infos:
             return
 
         # Find the new name: look for a connection name we don't recognize
-        known_names = set(self._connections.keys())
+        known_names = set(self._conn_infos.keys())
         new_name = None
         for c in get_connections():
             if c['name'] not in known_names:
@@ -550,8 +535,8 @@ class MainWindow(QMainWindow):
         if not new_name or new_name == old_name:
             return
 
-        # Update connections dict
-        self._connections[new_name] = self._connections.pop(old_name)
+        # Update dicts
+        self._conn_infos[new_name] = self._conn_infos.pop(old_name)
         if old_name in self._adapters:
             self._adapters[new_name] = self._adapters.pop(old_name)
         if old_name in self._db_types:
@@ -562,7 +547,7 @@ class MainWindow(QMainWindow):
             tab = self.tab_container.widget(i)
             if hasattr(tab, 'connection_name') and tab.connection_name == old_name:
                 tab.connection_name = new_name
-                tab.connection = self._connections[new_name]
+                tab.conn_info = self._conn_infos[new_name]
                 current_text = self.tab_container.tabText(i)
                 new_text = current_text.replace(old_name, new_name)
                 self.tab_container.setTabText(i, new_text)
@@ -643,6 +628,10 @@ class MainWindow(QMainWindow):
         """Set status bar message."""
         self.status_bar.showMessage(message, timeout)
 
-    def get_connection(self, name: str) -> Optional[Any]:
-        """Get active connection by name."""
-        return self._connections.get(name)
+    def get_conn_info(self, name: str) -> Optional[Dict]:
+        """Get connection info by name."""
+        return self._conn_infos.get(name)
+
+    def get_adapter(self, name: str) -> Optional[Any]:
+        """Get adapter for a connection by name."""
+        return self._adapters.get(name)

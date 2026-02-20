@@ -46,15 +46,19 @@ class SpoolWorker(QThread):
     pdf_complete = pyqtSignal(str)  # output_path
     error = pyqtSignal(str)
 
-    def __init__(self, connection: Any, operation: str, **kwargs):
+    def __init__(self, conn_info: dict, adapter: Any, operation: str, **kwargs):
         super().__init__()
-        self.connection = connection
+        self.conn_info = conn_info
+        self.adapter = adapter
+        self.connection = None
         self.operation = operation
         self.kwargs = kwargs
 
     def run(self) -> None:
         """Execute operation in background."""
+        from ...adapters import connect_from_info
         try:
+            self.connection = connect_from_info(self.adapter, self.conn_info)
             if self.operation == "list":
                 self._list_spool_files()
             elif self.operation == "view":
@@ -65,6 +69,12 @@ class SpoolWorker(QThread):
                 self._generate_pdf()
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            if self.connection:
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
 
     def _list_spool_files(self) -> None:
         """List spool files for user."""
@@ -247,12 +257,13 @@ class SpoolWorker(QThread):
 class SpoolTab(QWidget):
     """Tab widget for IBM i spool file management."""
 
-    def __init__(self, connection_name: str, connection: Any,
-                 parent: Optional[QWidget] = None):
+    def __init__(self, connection_name: str, conn_info: dict,
+                 adapter: Any, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         self.connection_name = connection_name
-        self.connection = connection
+        self.conn_info = conn_info
+        self.adapter = adapter
         self._worker: Optional[SpoolWorker] = None
         self._search_matches: List[int] = []
         self._current_match: int = -1
@@ -436,7 +447,8 @@ class SpoolTab(QWidget):
         self.btn_refresh.setEnabled(False)
 
         self._worker = SpoolWorker(
-            self.connection,
+            self.conn_info,
+            self.adapter,
             "list",
             user=user
         )
@@ -480,7 +492,8 @@ class SpoolTab(QWidget):
         self.btn_print.setEnabled(False)
 
         self._worker = SpoolWorker(
-            self.connection,
+            self.conn_info,
+            self.adapter,
             "view",
             file_name=file_name,
             qualified_job=qualified_job,
@@ -534,7 +547,8 @@ class SpoolTab(QWidget):
         self.btn_refresh.setEnabled(False)
 
         self._worker = SpoolWorker(
-            self.connection,
+            self.conn_info,
+            self.adapter,
             "delete",
             files=files_to_delete
         )
@@ -584,7 +598,8 @@ class SpoolTab(QWidget):
         self.viewer_status.setText("Generating PDF...")
 
         self._worker = SpoolWorker(
-            self.connection,
+            self.conn_info,
+            self.adapter,
             "pdf",
             file_name=self._current_spool_info["file_name"],
             qualified_job=self._current_spool_info["qualified_job"],
@@ -713,7 +728,8 @@ class SpoolTab(QWidget):
         self._print_temp_path = temp_path
 
         self._worker = SpoolWorker(
-            self.connection,
+            self.conn_info,
+            self.adapter,
             "pdf",
             file_name=self._current_spool_info["file_name"],
             qualified_job=self._current_spool_info["qualified_job"],

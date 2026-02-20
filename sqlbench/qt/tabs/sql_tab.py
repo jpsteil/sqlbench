@@ -137,11 +137,11 @@ class QueryWorker(QThread):
     error = pyqtSignal(str)
     row_count = pyqtSignal(int)
 
-    def __init__(self, connection: Any, sql: str, adapter: Any = None,
+    def __init__(self, conn_info: dict, sql: str, adapter: Any = None,
                  limit: int = 1000, offset: int = 0,
                  fetch_all: bool = False, run_count: bool = True):
         super().__init__()
-        self.connection = connection
+        self.conn_info = conn_info
         self.sql = sql
         self.adapter = adapter
         self.limit = limit
@@ -162,8 +162,11 @@ class QueryWorker(QThread):
 
     def run(self) -> None:
         """Execute query in background."""
+        from ...adapters import connect_from_info
+        conn = None
         try:
-            cursor = self.connection.cursor()
+            conn = connect_from_info(self.adapter, self.conn_info)
+            cursor = conn.cursor()
 
             sql_stripped = self.sql.strip()
             while sql_stripped.endswith(';'):
@@ -222,6 +225,12 @@ class QueryWorker(QThread):
         except Exception as e:
             if not self._cancelled:
                 self.error.emit(str(e))
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 class ScriptWorker(QThread):
@@ -230,9 +239,10 @@ class ScriptWorker(QThread):
     all_finished = pyqtSignal(list, float)  # results_list, total_time
     error = pyqtSignal(str)
 
-    def __init__(self, connection: Any, statements: List[str]):
+    def __init__(self, conn_info: dict, adapter: Any, statements: List[str]):
         super().__init__()
-        self.connection = connection
+        self.conn_info = conn_info
+        self.adapter = adapter
         self.statements = statements
         self._cancelled = False
 
@@ -242,78 +252,91 @@ class ScriptWorker(QThread):
 
     def run(self) -> None:
         """Execute all statements sequentially."""
-        results = []
-        total_start = time.time()
+        from ...adapters import connect_from_info
+        conn = None
+        try:
+            conn = connect_from_info(self.adapter, self.conn_info)
+            results = []
+            total_start = time.time()
 
-        for i, stmt in enumerate(self.statements):
-            if self._cancelled:
-                break
+            for i, stmt in enumerate(self.statements):
+                if self._cancelled:
+                    break
 
-            stmt_stripped = stmt.strip()
-            if not stmt_stripped:
-                continue
-            while stmt_stripped.endswith(';'):
-                stmt_stripped = stmt_stripped[:-1].strip()
-            if not stmt_stripped:
-                continue
+                stmt_stripped = stmt.strip()
+                if not stmt_stripped:
+                    continue
+                while stmt_stripped.endswith(';'):
+                    stmt_stripped = stmt_stripped[:-1].strip()
+                if not stmt_stripped:
+                    continue
 
-            result = {
-                "stmt": i + 1,
-                "sql": stmt_stripped[:200] + ('...' if len(stmt_stripped) > 200 else ''),
-                "full_sql": stmt_stripped,
-                "status": "",
-                "time": 0.0,
-                "row_count": 0,
-                "success": True,
-                "error": None,
-            }
+                result = {
+                    "stmt": i + 1,
+                    "sql": stmt_stripped[:200] + ('...' if len(stmt_stripped) > 200 else ''),
+                    "full_sql": stmt_stripped,
+                    "status": "",
+                    "time": 0.0,
+                    "row_count": 0,
+                    "success": True,
+                    "error": None,
+                }
 
-            try:
-                cursor = self.connection.cursor()
-                start = time.time()
-                cursor.execute(stmt_stripped)
-                elapsed = time.time() - start
+                try:
+                    cursor = conn.cursor()
+                    start = time.time()
+                    cursor.execute(stmt_stripped)
+                    elapsed = time.time() - start
 
-                if cursor.description:
-                    rows = cursor.fetchall()
-                    result["row_count"] = len(rows)
-                    result["status"] = f"{len(rows)} row(s) returned"
-                else:
-                    rc = cursor.rowcount if cursor.rowcount >= 0 else 0
-                    result["row_count"] = rc
-                    sql_upper = stmt_stripped.upper()
-                    if sql_upper.startswith("INSERT"):
-                        result["status"] = f"{rc} row(s) inserted"
-                    elif sql_upper.startswith("UPDATE"):
-                        result["status"] = f"{rc} row(s) updated"
-                    elif sql_upper.startswith("DELETE"):
-                        result["status"] = f"{rc} row(s) deleted"
+                    if cursor.description:
+                        rows = cursor.fetchall()
+                        result["row_count"] = len(rows)
+                        result["status"] = f"{len(rows)} row(s) returned"
                     else:
-                        result["status"] = f"OK ({rc} row(s) affected)"
+                        rc = cursor.rowcount if cursor.rowcount >= 0 else 0
+                        result["row_count"] = rc
+                        sql_upper = stmt_stripped.upper()
+                        if sql_upper.startswith("INSERT"):
+                            result["status"] = f"{rc} row(s) inserted"
+                        elif sql_upper.startswith("UPDATE"):
+                            result["status"] = f"{rc} row(s) updated"
+                        elif sql_upper.startswith("DELETE"):
+                            result["status"] = f"{rc} row(s) deleted"
+                        else:
+                            result["status"] = f"OK ({rc} row(s) affected)"
+                        try:
+                            conn.commit()
+                        except Exception:
+                            pass
+
+                    result["time"] = elapsed
+                    cursor.close()
+
+                except Exception as e:
+                    result["success"] = False
+                    result["status"] = "ERROR"
+                    result["error"] = str(e)
+                    result["time"] = time.time() - start
                     try:
-                        self.connection.commit()
+                        conn.rollback()
                     except Exception:
                         pass
 
-                result["time"] = elapsed
-                cursor.close()
+                results.append(result)
 
-            except Exception as e:
-                result["success"] = False
-                result["status"] = "ERROR"
-                result["error"] = str(e)
-                result["time"] = time.time() - start
+            total_time = time.time() - total_start
+
+            if not self._cancelled:
+                self.all_finished.emit(results, total_time)
+        except Exception as e:
+            if not self._cancelled:
+                self.error.emit(str(e))
+        finally:
+            if conn:
                 try:
-                    self.connection.rollback()
+                    conn.close()
                 except Exception:
                     pass
-
-            results.append(result)
-
-        total_time = time.time() - total_start
-
-        if not self._cancelled:
-            self.all_finished.emit(results, total_time)
 
 
 class SQLEditor(QPlainTextEdit):
@@ -611,13 +634,13 @@ class ResultsTable(QTableWidget):
 class SQLTab(QWidget):
     """Tab widget for SQL editing and execution."""
 
-    def __init__(self, connection_name: str, connection: Any,
+    def __init__(self, connection_name: str, conn_info: dict,
                  adapter: Any = None, db_type: str = '',
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         self.connection_name = connection_name
-        self.connection = connection
+        self.conn_info = conn_info
         self.adapter = adapter
         self.db_type = db_type
         self._worker: Optional[QueryWorker] = None
@@ -1141,7 +1164,7 @@ class SQLTab(QWidget):
         self.btn_cancel.setEnabled(True)
         self._set_status(f"Executing {len(statements)} statement(s)...")
 
-        self._script_worker = ScriptWorker(self.connection, statements)
+        self._script_worker = ScriptWorker(self.conn_info, self.adapter, statements)
         self._script_worker.all_finished.connect(self._on_script_finished)
         self._script_worker.error.connect(self._on_query_error)
         self._script_worker.start()
@@ -1272,7 +1295,7 @@ class SQLTab(QWidget):
 
         # Start worker
         self._worker = QueryWorker(
-            self.connection, sql, self.adapter,
+            self.conn_info, sql, self.adapter,
             self._rows_per_page, 0,
             self.chk_show_all.isChecked(), run_count=True
         )
@@ -1476,7 +1499,7 @@ class SQLTab(QWidget):
         self._set_status("Loading page...")
 
         self._worker = QueryWorker(
-            self.connection, self._last_sql, self.adapter,
+            self.conn_info, self._last_sql, self.adapter,
             self._rows_per_page, offset,
             fetch_all=False, run_count=False
         )
@@ -1850,9 +1873,12 @@ class SQLTab(QWidget):
         if not self.adapter or self.db_type != "ibmi":
             return None
 
+        from ...adapters import connect_from_info
+        conn = None
         explain_data = []
         try:
-            explain_cursor = self.connection.cursor()
+            conn = connect_from_info(self.adapter, self.conn_info)
+            explain_cursor = conn.cursor()
             try:
                 explain_cursor.execute("CALL QSYS2.OVERRIDE_QAQQINI(1, '', '')")
             except Exception:
@@ -1861,7 +1887,7 @@ class SQLTab(QWidget):
             tables = self._extract_tables_from_sql(sql)
             for table in tables[:5]:
                 try:
-                    idx_cursor = self.connection.cursor()
+                    idx_cursor = conn.cursor()
                     idx_cursor.execute("""
                         SELECT INDEX_NAME, COLUMN_NAME, INDEX_TYPE, IS_UNIQUE
                         FROM QSYS2.SYSINDEXES I
@@ -1889,6 +1915,12 @@ class SQLTab(QWidget):
             explain_cursor.close()
         except Exception:
             pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         return "\n".join(explain_data) if explain_data else None
 
@@ -1990,8 +2022,13 @@ class SQLTab(QWidget):
             return
 
         try:
-            pk_cols = self.adapter.get_primary_key_columns(
-                self.connection, schema, table)
+            from ...adapters import connect_from_info
+            pk_conn = connect_from_info(self.adapter, self.conn_info)
+            try:
+                pk_cols = self.adapter.get_primary_key_columns(
+                    pk_conn, schema, table)
+            finally:
+                pk_conn.close()
         except Exception:
             pk_cols = []
 
@@ -2104,44 +2141,57 @@ class SQLTab(QWidget):
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
+        from ...adapters import connect_from_info
         errors = []
         success_count = 0
         db = _get_db()
+        conn = None
 
-        for row_idx, changes in list(self._modified_cells.items()):
-            original = self._original_values.get(row_idx)
-            if not original:
-                continue
-            try:
-                sql, params = self._generate_update_sql(changes, original)
-                if sql:
-                    cursor = self.connection.cursor()
-                    start_time = time.time()
-                    cursor.execute(sql, params)
-                    self.connection.commit()
-                    duration = time.time() - start_time
-                    cursor.close()
-                    success_count += 1
+        try:
+            conn = connect_from_info(self.adapter, self.conn_info)
 
-                    log_sql = self._format_sql_with_params(sql, params)
-                    db.log_query(self.connection_name, log_sql, duration, 1, "success")
-
-                    # Update original values
-                    current = list(original)
-                    for col_idx, val in changes.items():
-                        current[col_idx] = val
-                    self._original_values[row_idx] = tuple(current)
-
-                    # Remove highlight
-                    for c in range(self.results_table.columnCount()):
-                        it = self.results_table.item(row_idx, c)
-                        if it:
-                            it.setBackground(QColor(0, 0, 0, 0))
-
-            except Exception as e:
-                errors.append(f"Row {row_idx + 1}: {e}")
+            for row_idx, changes in list(self._modified_cells.items()):
+                original = self._original_values.get(row_idx)
+                if not original:
+                    continue
                 try:
-                    self.connection.rollback()
+                    sql, params = self._generate_update_sql(changes, original)
+                    if sql:
+                        cursor = conn.cursor()
+                        start_time = time.time()
+                        cursor.execute(sql, params)
+                        conn.commit()
+                        duration = time.time() - start_time
+                        cursor.close()
+                        success_count += 1
+
+                        log_sql = self._format_sql_with_params(sql, params)
+                        db.log_query(self.connection_name, log_sql, duration, 1, "success")
+
+                        # Update original values
+                        current = list(original)
+                        for col_idx, val in changes.items():
+                            current[col_idx] = val
+                        self._original_values[row_idx] = tuple(current)
+
+                        # Remove highlight
+                        for c in range(self.results_table.columnCount()):
+                            it = self.results_table.item(row_idx, c)
+                            if it:
+                                it.setBackground(QColor(0, 0, 0, 0))
+
+                except Exception as e:
+                    errors.append(f"Row {row_idx + 1}: {e}")
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+        except Exception as e:
+            errors.append(f"Connection error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
                 except Exception:
                     pass
 

@@ -249,27 +249,31 @@ class ConnectionTreeWidget(QWidget):
 
     def _load_schemas(self, item: QTreeWidgetItem, connection_name: str) -> None:
         """Load schemas and tables for a connection."""
+        from ..adapters import connect_from_info
+
         if connection_name in self._loading_tables:
             return
         self._loading_tables.add(connection_name)
 
-        # Get main window to access connection
+        # Get connection info from main window
         main_window = self.window()
-        if not hasattr(main_window, 'get_connection'):
+        if not hasattr(main_window, 'get_conn_info'):
             self._loading_tables.discard(connection_name)
             return
 
-        connection = main_window.get_connection(connection_name)
-        if not connection:
+        conn_info = main_window.get_conn_info(connection_name)
+        if not conn_info:
             self._loading_tables.discard(connection_name)
             return
 
-        conn_info = self._connections_info.get(connection_name, {})
         adapter = get_adapter(conn_info.get('db_type'))
         if not adapter:
+            self._loading_tables.discard(connection_name)
             return
 
+        connection = None
         try:
+            connection = connect_from_info(adapter, conn_info)
             cursor = connection.cursor()
             cursor.execute(adapter.get_tables_query())
             tables = cursor.fetchall()
@@ -329,6 +333,12 @@ class ConnectionTreeWidget(QWidget):
             error_item = QTreeWidgetItem([f"Error: {str(e)[:50]}"])
             item.addChild(error_item)
             self._loading_tables.discard(connection_name)
+        finally:
+            if connection:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     def _load_tables(self, schema_item: QTreeWidgetItem) -> None:
         """Load tables for a schema.
@@ -340,6 +350,8 @@ class ConnectionTreeWidget(QWidget):
 
     def _load_columns(self, table_item: QTreeWidgetItem) -> None:
         """Load columns for a table."""
+        from ..adapters import connect_from_info
+
         data = table_item.data(0, Qt.ItemDataRole.UserRole)
         connection_name = data.get('connection')
         schema_name = data.get('schema')
@@ -351,21 +363,24 @@ class ConnectionTreeWidget(QWidget):
         self._loading_fields.add(field_key)
 
         main_window = self.window()
-        if not hasattr(main_window, 'get_connection'):
+        if not hasattr(main_window, 'get_conn_info'):
             self._loading_fields.discard(field_key)
             return
 
-        connection = main_window.get_connection(connection_name)
-        if not connection:
+        conn_info = main_window.get_conn_info(connection_name)
+        if not conn_info:
             self._loading_fields.discard(field_key)
             return
 
-        conn_info = self._connections_info.get(connection_name, {})
         adapter = get_adapter(conn_info.get('db_type'))
         if not adapter:
+            self._loading_fields.discard(field_key)
             return
 
+        connection = None
         try:
+            connection = connect_from_info(adapter, conn_info)
+
             # Build table reference for adapter
             table_ref = f"{schema_name}.{table_name}" if schema_name else table_name
 
@@ -412,6 +427,12 @@ class ConnectionTreeWidget(QWidget):
             error_item = QTreeWidgetItem([f"Error: {str(e)[:50]}"])
             table_item.addChild(error_item)
             self._loading_fields.discard(field_key)
+        finally:
+            if connection:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     def _on_filter_changed(self, text: str) -> None:
         """Handle filter text change."""
