@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QHeaderView,
     QAbstractItemView,
+    QAbstractItemDelegate,
     QApplication,
     QFrame,
 )
@@ -498,9 +499,35 @@ class ResultsTable(QTableWidget):
         self.horizontalHeader().sectionDoubleClicked.connect(self._auto_fit_column)
         self.verticalHeader().setDefaultSectionSize(24)
 
+        # Column width tracking for font scaling
+        self._base_widths: dict = {}  # col_index -> base width at scale 1.0
+        self._pk_indices: List[int] = []  # set by SQLTab for tab-to-next-cell
+
         # Context menu
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def closeEditor(self, editor, hint) -> None:
+        """Override to skip PK columns when Tab is pressed during editing."""
+        if hint == QAbstractItemDelegate.EndEditHint.EditNextItem and self._pk_indices:
+            # Tab was pressed — commit and move to next non-PK column
+            super().closeEditor(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+            row = self.currentRow()
+            col = self.currentColumn()
+            next_col = col + 1
+            while next_col < self.columnCount():
+                if next_col not in self._pk_indices:
+                    self.setCurrentCell(row, next_col)
+                    self.editItem(self.item(row, next_col))
+                    return
+                next_col += 1
+            return
+        super().closeEditor(editor, hint)
+
+    def scale_columns(self, scale: float) -> None:
+        """Scale column widths based on font size ratio."""
+        for col, base_w in self._base_widths.items():
+            self.setColumnWidth(col, int(base_w * scale))
 
     def _show_context_menu(self, pos) -> None:
         """Show context menu."""
@@ -623,10 +650,15 @@ class ResultsTable(QTableWidget):
         # Resize columns to content
         self.resizeColumnsToContents()
 
-        # Cap column widths
+        # Cap column widths and store base widths for font scaling
+        font_size = int(get_setting("font_size", "13"))
+        scale = font_size / 13.0
+        self._base_widths = {}
         for i in range(self.columnCount()):
             if self.columnWidth(i) > 300:
                 self.setColumnWidth(i, 300)
+            # Store base width (at scale 1.0) for later rescaling
+            self._base_widths[i] = int(self.columnWidth(i) / scale) if scale else self.columnWidth(i)
 
         self.setSortingEnabled(True)
 
@@ -1132,6 +1164,24 @@ class SQLTab(QWidget):
     def has_unsaved_changes(self) -> bool:
         """Check if this tab has unsaved cell edits."""
         return bool(self._modified_cells)
+
+    def set_font_size(self, size: int) -> None:
+        """Apply new font size to editor and results."""
+        self.editor.set_font_size(size)
+
+        # Scale results and fields column widths
+        scale = size / 13.0
+        self.results_table.scale_columns(scale)
+
+        # Scale row heights
+        row_height = max(24, int(size * 1.8))
+        self.results_table.verticalHeader().setDefaultSectionSize(row_height)
+        self.fields_table.verticalHeader().setDefaultSectionSize(row_height)
+
+        # Update stats font
+        font = self.stats_text.font()
+        font.setPointSize(size)
+        self.stats_text.setFont(font)
 
     def set_sql(self, sql: str) -> None:
         """Set the SQL text."""
@@ -2005,6 +2055,7 @@ class SQLTab(QWidget):
         self._edit_schema = None
         self._pk_columns = []
         self._pk_indices = []
+        self.results_table._pk_indices = []
         self._original_values = {}
         self._modified_cells = {}
         self.btn_save_changes.hide()
@@ -2053,6 +2104,7 @@ class SQLTab(QWidget):
         self._edit_schema = schema
         self._pk_columns = pk_cols
         self._pk_indices = pk_indices
+        self.results_table._pk_indices = pk_indices
 
         # Store original values
         for row_idx, row in enumerate(rows):

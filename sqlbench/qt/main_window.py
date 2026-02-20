@@ -35,7 +35,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("SQLBench")
+        from ..version import __version__
+        self.setWindowTitle(f"SQLBench v{__version__}")
         self.setMinimumSize(1024, 600)
 
         # Load theme preference
@@ -314,8 +315,17 @@ class MainWindow(QMainWindow):
         from .dialogs.settings_dialog import SettingsDialog
         dialog = SettingsDialog(self)
         if dialog.exec():
-            # Apply settings
-            pass
+            self._apply_font_size()
+
+    def _apply_font_size(self) -> None:
+        """Apply current font size setting to all open tabs."""
+        from .tabs.sql_tab import SQLTab
+        size = int(get_setting("font_size", "13"))
+        for i in range(self.tab_container.count()):
+            tab = self.tab_container.widget(i)
+            if isinstance(tab, SQLTab):
+                tab.set_font_size(size)
+        self.status_bar.showMessage(f"Font size set to {size}", 3000)
 
     def _reset_layout(self) -> None:
         """Reset window layout to defaults."""
@@ -330,6 +340,7 @@ class MainWindow(QMainWindow):
         )
 
         set_setting("font_size", "13")
+        self._apply_font_size()
         self.status_bar.showMessage("Layout reset to defaults", 3000)
 
     def _restore_tab_layouts(self) -> None:
