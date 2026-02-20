@@ -114,7 +114,6 @@ class MainWindow(QMainWindow):
         self.connection_tree = ConnectionTreeWidget()
         self.connection_tree.connection_selected.connect(self._on_connection_selected)
         self.connection_tree.connect_requested.connect(self._on_connect_requested)
-        self.connection_tree.disconnect_requested.connect(self._on_disconnect_requested)
         self.connection_tree.new_sql_requested.connect(self._on_new_sql_tab)
         self.connection_tree.new_spool_requested.connect(self._on_new_spool_tab)
         self.connection_tree.show_rows_requested.connect(self._on_show_rows)
@@ -373,12 +372,8 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Selected: {connection_name}")
 
     def _on_connect_requested(self, connection_name: str) -> None:
-        """Handle request to connect to a database."""
+        """Handle request to activate a connection (verify credentials)."""
         self._connect(connection_name)
-
-    def _on_disconnect_requested(self, connection_name: str) -> None:
-        """Handle request to disconnect from a database."""
-        self.disconnect(connection_name)
 
     def _on_new_sql_tab(self, connection_name: str) -> None:
         """Create new SQL tab for connection."""

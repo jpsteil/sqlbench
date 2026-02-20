@@ -38,8 +38,7 @@ class ConnectionTreeWidget(QWidget):
     show_rows_requested = pyqtSignal(str, str, str)  # connection, schema, table
     edit_connection_requested = pyqtSignal(str)  # connection_name
     new_connection_requested = pyqtSignal()
-    connect_requested = pyqtSignal(str)  # connection_name
-    disconnect_requested = pyqtSignal(str)  # connection_name
+    connect_requested = pyqtSignal(str)  # connection_name (auto-activate on expand)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -130,12 +129,6 @@ class ConnectionTreeWidget(QWidget):
         """Set up right-click context menu."""
         self.context_menu = QMenu(self)
 
-        self.action_connect = QAction("Connect", self)
-        self.action_connect.triggered.connect(self._connect_selected)
-
-        self.action_disconnect = QAction("Disconnect", self)
-        self.action_disconnect.triggered.connect(self._disconnect_selected)
-
         self.action_new_sql = QAction("New SQL", self)
         self.action_new_sql.triggered.connect(self._new_sql_for_selected)
 
@@ -173,7 +166,9 @@ class ConnectionTreeWidget(QWidget):
         self._connections_info[name] = conn
         self._connected[name] = False
 
-        item = QTreeWidgetItem([name])
+        host = conn.get('host', '')
+        display_name = f"{name} - {host}" if host else name
+        item = QTreeWidgetItem([display_name])
         item.setData(0, Qt.ItemDataRole.UserRole, {
             'type': 'connection',
             'name': name,
@@ -193,29 +188,31 @@ class ConnectionTreeWidget(QWidget):
         return item
 
     def set_connected(self, connection_name: str, connected: bool) -> None:
-        """Update connection status."""
+        """Update connection activation status."""
         self._connected[connection_name] = connected
 
-        # Update item text
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data and data.get('name') == connection_name:
-                if connected:
-                    item.setText(0, f"{connection_name} (connected)")
-                    # Expand if this was pending from double-click
-                    if hasattr(self, '_pending_expand') and self._pending_expand == item:
-                        item.setExpanded(True)
-                        self._pending_expand = None
-                else:
-                    item.setText(0, connection_name)
-                    # Clear children
+        if not connected:
+            # Clear cached schemas
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                data = item.data(0, Qt.ItemDataRole.UserRole)
+                if data and data.get('name') == connection_name:
                     item.takeChildren()
                     placeholder = QTreeWidgetItem(["Loading..."])
                     placeholder.setData(0, Qt.ItemDataRole.UserRole, {'type': 'placeholder'})
                     item.addChild(placeholder)
                     self._loaded_schemas[connection_name] = False
-                break
+                    break
+        else:
+            # Expand if pending from expand attempt
+            if self._pending_expand:
+                for i in range(self.tree.topLevelItemCount()):
+                    item = self.tree.topLevelItem(i)
+                    data = item.data(0, Qt.ItemDataRole.UserRole)
+                    if data and data.get('name') == connection_name and item == self._pending_expand:
+                        item.setExpanded(True)
+                        self._pending_expand = None
+                        break
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         """Handle item expansion - load children if needed."""
@@ -541,14 +538,7 @@ class ConnectionTreeWidget(QWidget):
 
         if item_type == 'connection':
             connection_name = data.get('name')
-            is_connected = self._connected.get(connection_name, False)
 
-            if is_connected:
-                menu.addAction(self.action_disconnect)
-            else:
-                menu.addAction(self.action_connect)
-
-            menu.addSeparator()
             menu.addAction(self.action_new_sql)
 
             # Check if IBM i for spool files
@@ -576,16 +566,7 @@ class ConnectionTreeWidget(QWidget):
 
         item_type = data.get('type')
 
-        if item_type == 'connection':
-            connection_name = data.get('name')
-            if not self._connected.get(connection_name):
-                self.connect_requested.emit(connection_name)
-                # Store item to expand after connect succeeds
-                self._pending_expand = item
-            else:
-                item.setExpanded(not item.isExpanded())
-
-        elif item_type in ('schema', 'table'):
+        if item_type in ('connection', 'schema', 'table'):
             item.setExpanded(not item.isExpanded())
 
     def _on_current_changed(self, current: QTreeWidgetItem,
@@ -608,22 +589,6 @@ class ConnectionTreeWidget(QWidget):
             return data.get('name')
         else:
             return data.get('connection')
-
-    def _connect_selected(self) -> None:
-        """Connect the selected connection."""
-        item = self.tree.currentItem()
-        if item:
-            connection_name = self._get_connection_for_item(item)
-            if connection_name:
-                self.connect_requested.emit(connection_name)
-
-    def _disconnect_selected(self) -> None:
-        """Disconnect the selected connection."""
-        item = self.tree.currentItem()
-        if item:
-            connection_name = self._get_connection_for_item(item)
-            if connection_name:
-                self.disconnect_requested.emit(connection_name)
 
     def _new_sql_for_selected(self) -> None:
         """Create new SQL tab for selected connection."""
@@ -707,14 +672,6 @@ class ConnectionTreeWidget(QWidget):
             elif item.parent():
                 self.tree.setCurrentItem(item.parent())
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Space):
-            data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data:
-                if data.get('type') == 'connection':
-                    if not self._connected.get(data.get('name')):
-                        self.connect_requested.emit(data.get('name'))
-                    else:
-                        item.setExpanded(not item.isExpanded())
-                else:
-                    item.setExpanded(not item.isExpanded())
+            item.setExpanded(not item.isExpanded())
         else:
             super().keyPressEvent(event)
