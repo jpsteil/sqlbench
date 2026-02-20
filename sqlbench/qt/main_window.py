@@ -633,7 +633,12 @@ class MainWindow(QMainWindow):
             success, message = result
             self.status_bar.showMessage("Upgrade complete" if success else "Upgrade failed", 3000)
             if success:
-                QMessageBox.information(self, "Upgrade Complete", message)
+                result = QMessageBox.question(
+                    self, "Upgrade Complete",
+                    "SQLBench has been upgraded.\n\nWould you like to restart now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if result == QMessageBox.StandardButton.Yes:
+                    self._restart_app()
             else:
                 QMessageBox.warning(self, "Upgrade Failed", message)
 
@@ -641,6 +646,23 @@ class MainWindow(QMainWindow):
         thread = threading.Thread(target=do_upgrade, daemon=True)
         thread.start()
         QTimer.singleShot(2000, poll_result)
+
+    def _restart_app(self) -> None:
+        """Restart the application."""
+        import sys
+        import os
+
+        # Save window state
+        self._save_state()
+
+        # Start new process before closing
+        if sys.argv[0].endswith('sqlbench') or 'sqlbench' in sys.argv[0]:
+            subprocess.Popen([sys.argv[0]])
+        else:
+            subprocess.Popen([sys.executable, '-m', 'sqlbench'])
+
+        self.close()
+        os._exit(0)
 
     def set_status(self, message: str, timeout: int = 0) -> None:
         """Set status bar message."""
