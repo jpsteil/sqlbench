@@ -599,30 +599,39 @@ class MainWindow(QMainWindow):
 
     def _run_upgrade(self) -> None:
         """Run pipx upgrade in background."""
+        self._upgrade_result = None  # (success: bool, message: str)
+
         def do_upgrade():
             try:
                 result = subprocess.run(
                     ["pipx", "upgrade", "sqlbench"],
                     capture_output=True, text=True)
                 if result.returncode == 0:
-                    QTimer.singleShot(0, lambda: QMessageBox.information(
-                        self, "Upgrade Complete",
-                        "SQLBench has been upgraded.\nPlease restart to use the new version."))
+                    self._upgrade_result = (True, "SQLBench has been upgraded.\nPlease restart to use the new version.")
                 else:
                     error = result.stderr or result.stdout or "Unknown error"
-                    QTimer.singleShot(0, lambda: QMessageBox.warning(
-                        self, "Upgrade Failed", f"Failed to upgrade:\n{error}"))
+                    self._upgrade_result = (False, f"Failed to upgrade:\n{error}")
             except FileNotFoundError:
-                QTimer.singleShot(0, lambda: QMessageBox.warning(
-                    self, "Upgrade Failed",
-                    "pipx not found. Please upgrade manually:\n\npipx upgrade sqlbench"))
+                self._upgrade_result = (False, "pipx not found. Please upgrade manually:\n\npipx upgrade sqlbench")
             except Exception as e:
-                QTimer.singleShot(0, lambda: QMessageBox.warning(
-                    self, "Upgrade Failed", f"Failed to upgrade:\n{e}"))
+                self._upgrade_result = (False, f"Failed to upgrade:\n{e}")
+
+        def poll_result():
+            result = self._upgrade_result
+            if result is None:
+                QTimer.singleShot(500, poll_result)
+                return
+            success, message = result
+            self.status_bar.showMessage("Upgrade complete" if success else "Upgrade failed", 3000)
+            if success:
+                QMessageBox.information(self, "Upgrade Complete", message)
+            else:
+                QMessageBox.warning(self, "Upgrade Failed", message)
 
         self.status_bar.showMessage("Upgrading SQLBench...")
         thread = threading.Thread(target=do_upgrade, daemon=True)
         thread.start()
+        QTimer.singleShot(2000, poll_result)
 
     def set_status(self, message: str, timeout: int = 0) -> None:
         """Set status bar message."""
