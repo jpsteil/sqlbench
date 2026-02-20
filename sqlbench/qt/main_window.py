@@ -605,12 +605,15 @@ class MainWindow(QMainWindow):
             try:
                 result = subprocess.run(
                     ["pipx", "upgrade", "sqlbench"],
-                    capture_output=True, text=True)
+                    capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL, timeout=120)
                 if result.returncode == 0:
                     self._upgrade_result = (True, "SQLBench has been upgraded.\nPlease restart to use the new version.")
                 else:
                     error = result.stderr or result.stdout or "Unknown error"
                     self._upgrade_result = (False, f"Failed to upgrade:\n{error}")
+            except subprocess.TimeoutExpired:
+                self._upgrade_result = (False, "Upgrade timed out. Please upgrade manually:\n\npipx upgrade sqlbench")
             except FileNotFoundError:
                 self._upgrade_result = (False, "pipx not found. Please upgrade manually:\n\npipx upgrade sqlbench")
             except Exception as e:

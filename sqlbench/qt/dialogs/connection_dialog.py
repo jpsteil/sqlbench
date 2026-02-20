@@ -303,6 +303,7 @@ class ConnectionDialog(QDialog):
         import subprocess
         import sys
         import threading
+        from PyQt6.QtCore import QTimer
 
         db_type = self.cmb_type.currentData()
         adapter_cls = ADAPTERS.get(db_type)
@@ -317,23 +318,34 @@ class ConnectionDialog(QDialog):
 
         self.btn_install_driver.setEnabled(False)
         self.btn_install_driver.setText("Installing...")
+        self._install_result = None  # (success: bool, error: str or None)
 
         def do_install():
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "pip", "install", pkg],
-                    capture_output=True, text=True)
-                from PyQt6.QtCore import QTimer
+                    capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL, timeout=120)
                 if result.returncode == 0:
-                    QTimer.singleShot(0, self._on_driver_installed)
+                    self._install_result = (True, None)
                 else:
                     error = result.stderr or result.stdout or "Unknown error"
-                    QTimer.singleShot(0, lambda: self._on_driver_install_failed(error))
+                    self._install_result = (False, error)
             except Exception as e:
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._on_driver_install_failed(str(e)))
+                self._install_result = (False, str(e))
+
+        def poll_result():
+            if self._install_result is None:
+                QTimer.singleShot(500, poll_result)
+                return
+            success, error = self._install_result
+            if success:
+                self._on_driver_installed()
+            else:
+                self._on_driver_install_failed(error)
 
         threading.Thread(target=do_install, daemon=True).start()
+        QTimer.singleShot(2000, poll_result)
 
     def _on_driver_installed(self) -> None:
         """Handle successful driver installation."""
