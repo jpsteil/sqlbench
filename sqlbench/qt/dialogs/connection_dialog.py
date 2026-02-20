@@ -91,12 +91,14 @@ class ConnectionDialog(QDialog):
         self.btn_new = QPushButton("+")
         self.btn_new.setFixedWidth(32)
         self.btn_new.setToolTip("New connection")
+        self.btn_new.setAutoDefault(False)
         self.btn_new.clicked.connect(self._new_connection)
         btn_layout.addWidget(self.btn_new)
 
         self.btn_delete = QPushButton("−")
         self.btn_delete.setFixedWidth(32)
         self.btn_delete.setToolTip("Delete connection")
+        self.btn_delete.setAutoDefault(False)
         self.btn_delete.clicked.connect(self._delete_connection)
         btn_layout.addWidget(self.btn_delete)
 
@@ -170,6 +172,11 @@ class ConnectionDialog(QDialog):
         self.txt_password.setPlaceholderText("password")
         form_layout.addRow("Password:", self.txt_password)
 
+        # Enter key in any field triggers Save
+        for field in (self.txt_name, self.txt_host, self.txt_port,
+                      self.txt_database, self.txt_user, self.txt_password):
+            field.returnPressed.connect(self._save_connection)
+
         # Options
         options_layout = QVBoxLayout()
 
@@ -194,6 +201,7 @@ class ConnectionDialog(QDialog):
         btn_layout = QHBoxLayout()
 
         self.btn_test = QPushButton("Test Connection")
+        self.btn_test.setAutoDefault(False)
         self.btn_test.clicked.connect(self._test_connection)
         btn_layout.addWidget(self.btn_test)
 
@@ -201,10 +209,12 @@ class ConnectionDialog(QDialog):
 
         self.btn_save = QPushButton("Save")
         self.btn_save.setProperty("primary", True)
+        self.btn_save.setDefault(True)
         self.btn_save.clicked.connect(self._save_connection)
         btn_layout.addWidget(self.btn_save)
 
         self.btn_close = QPushButton("Close")
+        self.btn_close.setAutoDefault(False)
         self.btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(self.btn_close)
 
@@ -251,7 +261,7 @@ class ConnectionDialog(QDialog):
 
         self.txt_name.setText(conn.get('name', ''))
         self.txt_host.setText(conn.get('host', ''))
-        self.txt_port.setText(str(conn.get('port', '')))
+        self.txt_port.setText(str(conn['port']) if conn.get('port') else '')
         self.txt_database.setText(conn.get('database', ''))
         self.txt_user.setText(conn.get('user', ''))
         self.txt_password.setText(conn.get('password', ''))
@@ -284,15 +294,20 @@ class ConnectionDialog(QDialog):
     def _on_type_changed(self) -> None:
         """Handle database type change."""
         db_type = self.cmb_type.currentData()
+        adapter_cls = ADAPTERS.get(db_type)
 
-        # IBM i doesn't use port/database
-        is_ibmi = db_type == "ibmi"
+        has_port = adapter_cls.default_port is not None if adapter_cls else True
+        has_database = adapter_cls.requires_database if adapter_cls else True
 
         # Hide/show port and database fields with their labels
-        self.txt_port.setVisible(not is_ibmi)
-        self.txt_database.setVisible(not is_ibmi)
-        self.lbl_port.setVisible(not is_ibmi)
-        self.lbl_database.setVisible(not is_ibmi)
+        self.txt_port.setVisible(has_port)
+        self.lbl_port.setVisible(has_port)
+        self.txt_database.setVisible(has_database)
+        self.lbl_database.setVisible(has_database)
+
+        # Pre-fill default port if empty
+        if has_port and not self.txt_port.text().strip() and adapter_cls:
+            self.txt_port.setText(str(adapter_cls.default_port))
 
         # Show install button if driver not available
         adapters = get_available_adapters()
@@ -441,13 +456,20 @@ class ConnectionDialog(QDialog):
             return
 
         db_type = self.cmb_type.currentData()
-        port = self.txt_port.text()
+        port = self.txt_port.text().strip()
+
+        # Use adapter default port if blank
+        if not port or not port.isdigit():
+            adapter_cls = ADAPTERS.get(db_type)
+            port = adapter_cls.default_port if adapter_cls else None
+        else:
+            port = int(port)
 
         conn_data = {
             'name': name,
             'db_type': db_type,
             'host': self.txt_host.text(),
-            'port': int(port) if port else None,
+            'port': port,
             'database': self.txt_database.text(),
             'user': self.txt_user.text(),
             'password': self.txt_password.text(),
