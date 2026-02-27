@@ -281,6 +281,8 @@ class ScriptWorker(QThread):
                     "row_count": 0,
                     "success": True,
                     "error": None,
+                    "rows": None,
+                    "description": None,
                 }
 
                 try:
@@ -293,6 +295,8 @@ class ScriptWorker(QThread):
                         rows = cursor.fetchall()
                         result["row_count"] = len(rows)
                         result["status"] = f"{len(rows)} row(s) returned"
+                        result["description"] = cursor.description
+                        result["rows"] = rows[:10000]
                     else:
                         rc = cursor.rowcount if cursor.rowcount >= 0 else 0
                         result["row_count"] = rc
@@ -370,22 +374,31 @@ class SQLEditor(QPlainTextEdit):
         # Shortcuts
         self._setup_shortcuts()
 
+    def _add_menu_action(self, menu, text, slot, shortcut=None) -> QAction:
+        """Add action to menu with proper PyQt6 overload handling."""
+        action = QAction(text, menu)
+        if shortcut:
+            action.setShortcut(shortcut)
+        action.triggered.connect(slot)
+        menu.addAction(action)
+        return action
+
     def _show_context_menu(self, pos) -> None:
         """Show context menu."""
         menu = QMenu(self)
 
-        undo_action = menu.addAction("Undo", self.undo, QKeySequence("Ctrl+Z"))
-        undo_action.setEnabled(self.document().isUndoAvailable())
-        redo_action = menu.addAction("Redo", self.redo, QKeySequence("Ctrl+Y"))
-        redo_action.setEnabled(self.document().isRedoAvailable())
+        undo = self._add_menu_action(menu, "Undo", self.undo, QKeySequence("Ctrl+Z"))
+        undo.setEnabled(self.document().isUndoAvailable())
+        redo = self._add_menu_action(menu, "Redo", self.redo, QKeySequence("Ctrl+Y"))
+        redo.setEnabled(self.document().isRedoAvailable())
         menu.addSeparator()
-        menu.addAction("Cut", self.cut, QKeySequence("Ctrl+X"))
-        menu.addAction("Copy", self.copy, QKeySequence("Ctrl+C"))
-        menu.addAction("Paste", self.paste, QKeySequence("Ctrl+V"))
+        self._add_menu_action(menu, "Cut", self.cut, QKeySequence("Ctrl+X"))
+        self._add_menu_action(menu, "Copy", self.copy, QKeySequence("Ctrl+C"))
+        self._add_menu_action(menu, "Paste", self.paste, QKeySequence("Ctrl+V"))
         menu.addSeparator()
-        menu.addAction("Select All", self.selectAll, QKeySequence("Ctrl+A"))
+        self._add_menu_action(menu, "Select All", self.selectAll, QKeySequence("Ctrl+A"))
         menu.addSeparator()
-        menu.addAction("Find...", self.find_requested.emit, QKeySequence("Ctrl+F"))
+        self._add_menu_action(menu, "Find...", self.find_requested.emit, QKeySequence("Ctrl+F"))
 
         menu.exec(self.mapToGlobal(pos))
 
@@ -398,16 +411,6 @@ class SQLEditor(QPlainTextEdit):
         # Ctrl+F5 - Execute All
         shortcut_exec_all = QShortcut(QKeySequence("Ctrl+F5"), self)
         shortcut_exec_all.activated.connect(self.execute_all_requested.emit)
-
-        # Ctrl+Z - Undo
-        shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
-        shortcut_undo.activated.connect(self.undo)
-
-        # Ctrl+Y or Ctrl+Shift+Z - Redo
-        shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
-        shortcut_redo.activated.connect(self.redo)
-        shortcut_redo2 = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
-        shortcut_redo2.activated.connect(self.redo)
 
     def update_theme(self) -> None:
         """Update colors when theme changes."""
@@ -532,10 +535,20 @@ class ResultsTable(QTableWidget):
     def _show_context_menu(self, pos) -> None:
         """Show context menu."""
         menu = QMenu(self)
-        menu.addAction("Copy", self._copy_selection, QKeySequence("Ctrl+C"))
+
+        copy_act = QAction("Copy", menu)
+        copy_act.setShortcut(QKeySequence("Ctrl+C"))
+        copy_act.triggered.connect(self._copy_selection)
+        menu.addAction(copy_act)
+
         menu.addAction("Copy with Headers", self._copy_with_headers)
         menu.addSeparator()
-        menu.addAction("Select All", self.selectAll, QKeySequence("Ctrl+A"))
+
+        sel_act = QAction("Select All", menu)
+        sel_act.setShortcut(QKeySequence("Ctrl+A"))
+        sel_act.triggered.connect(self.selectAll)
+        menu.addAction(sel_act)
+
         menu.exec(self.mapToGlobal(pos))
 
     def _copy_selection(self) -> None:
@@ -693,6 +706,8 @@ class SQLTab(QWidget):
         self._original_values: dict = {}  # row_index -> original row tuple
         self._modified_cells: dict = {}   # row_index -> {col_index: new_value}
         self._loading_results = False      # guard flag to ignore cellChanged during loads
+        self._in_script_mode = False
+        self._script_results = []          # result dicts for sub-tab field lookups
 
         self._setup_ui()
         self._connect_signals()
@@ -841,12 +856,18 @@ class SQLTab(QWidget):
         results_layout.setSpacing(0)
 
         # Results controls
-        controls = self._create_results_controls()
-        results_layout.addWidget(controls)
+        self._results_controls = self._create_results_controls()
+        results_layout.addWidget(self._results_controls)
 
         # Results table
         self.results_table = ResultsTable()
         results_layout.addWidget(self.results_table)
+
+        # Script sub-tabs (hidden by default, shown in script mode)
+        self._script_sub_tabs = QTabWidget()
+        self._script_sub_tabs.setDocumentMode(True)
+        self._script_sub_tabs.hide()
+        results_layout.addWidget(self._script_sub_tabs)
 
         # Status label
         self.results_status = QLabel("No results")
@@ -1178,6 +1199,14 @@ class SQLTab(QWidget):
         self.results_table.verticalHeader().setDefaultSectionSize(row_height)
         self.fields_table.verticalHeader().setDefaultSectionSize(row_height)
 
+        # Scale any visible script sub-tab tables
+        if self._in_script_mode:
+            for i in range(self._script_sub_tabs.count()):
+                w = self._script_sub_tabs.widget(i)
+                if isinstance(w, ResultsTable):
+                    w.scale_columns(scale)
+                    w.verticalHeader().setDefaultSectionSize(row_height)
+
         # Update stats font
         font = self.stats_text.font()
         font.setPointSize(size)
@@ -1219,6 +1248,93 @@ class SQLTab(QWidget):
         self._script_worker.error.connect(self._on_query_error)
         self._script_worker.start()
 
+    def _enter_script_mode(self, results: List) -> None:
+        """Switch to script sub-tab layout."""
+        self._in_script_mode = True
+        self._script_results = results
+
+        # Hide single-query controls and table
+        self._results_controls.hide()
+        self.results_table.hide()
+
+        # Clear previous sub-tabs
+        try:
+            self._script_sub_tabs.currentChanged.disconnect(self._on_script_sub_tab_changed)
+        except TypeError:
+            pass
+        while self._script_sub_tabs.count():
+            w = self._script_sub_tabs.widget(0)
+            self._script_sub_tabs.removeTab(0)
+            w.deleteLater()
+
+        # Summary tab
+        summary_table = ResultsTable()
+        summary_table.setSortingEnabled(False)
+        summary_table.setColumnCount(4)
+        summary_table.setHorizontalHeaderLabels(["#", "SQL", "Result", "Time"])
+        summary_table.setRowCount(len(results))
+        for i, r in enumerate(results):
+            summary_table.setItem(i, 0, QTableWidgetItem(str(r["stmt"])))
+            summary_table.setItem(i, 1, QTableWidgetItem(r["sql"]))
+            status_item = QTableWidgetItem(r["status"])
+            if not r["success"]:
+                status_item.setForeground(QColor(255, 80, 80))
+            summary_table.setItem(i, 2, status_item)
+            summary_table.setItem(i, 3, QTableWidgetItem(f"{r['time']:.3f}s"))
+        summary_table.resizeColumnsToContents()
+        for col in range(summary_table.columnCount()):
+            if summary_table.columnWidth(col) > 400:
+                summary_table.setColumnWidth(col, 400)
+        summary_table.setSortingEnabled(True)
+        self._script_sub_tabs.addTab(summary_table, "Summary")
+
+        # Per-SELECT result tabs
+        for r in results:
+            if r["rows"] is not None and r["description"] is not None:
+                table = ResultsTable()
+                table.load_results(r["rows"], r["description"])
+                label = f"#{r['stmt']} {r['sql'][:40]}"
+                self._script_sub_tabs.addTab(table, label)
+
+        # Connect tab-changed signal for Fields updates
+        self._script_sub_tabs.currentChanged.connect(self._on_script_sub_tab_changed)
+
+        self._script_sub_tabs.show()
+
+    def _exit_script_mode(self) -> None:
+        """Restore single-query layout."""
+        if not self._in_script_mode:
+            return
+        self._in_script_mode = False
+        self._script_results = []
+
+        # Clear and hide sub-tabs
+        self._script_sub_tabs.hide()
+        while self._script_sub_tabs.count():
+            w = self._script_sub_tabs.widget(0)
+            self._script_sub_tabs.removeTab(0)
+            w.deleteLater()
+
+        # Restore single-query widgets
+        self._results_controls.show()
+        self.results_table.show()
+
+    def _on_script_sub_tab_changed(self, index: int) -> None:
+        """Update Fields tab when a script sub-tab is selected."""
+        if index == 0:
+            # Summary tab — clear fields
+            self._update_fields(None)
+            return
+        # Map sub-tab index to the result that has rows
+        select_idx = 0
+        for r in self._script_results:
+            if r["rows"] is not None and r["description"] is not None:
+                select_idx += 1
+                if select_idx == index:
+                    self._update_fields(r["description"])
+                    return
+        self._update_fields(None)
+
     def _on_script_finished(self, results: List, total_time: float) -> None:
         """Handle script execution completion."""
         self._reset_buttons()
@@ -1237,29 +1353,8 @@ class SQLTab(QWidget):
             except Exception:
                 pass
 
-        # Display results in table with script columns
-        self._loading_results = True
-        self.results_table.clear()
-        self.results_table.setSortingEnabled(False)
-        self.results_table.setColumnCount(4)
-        self.results_table.setHorizontalHeaderLabels(["#", "SQL", "Result", "Time"])
-        self.results_table.setRowCount(len(results))
-
-        for i, r in enumerate(results):
-            self.results_table.setItem(i, 0, QTableWidgetItem(str(r["stmt"])))
-            self.results_table.setItem(i, 1, QTableWidgetItem(r["sql"]))
-            status_item = QTableWidgetItem(r["status"])
-            if not r["success"]:
-                status_item.setForeground(QColor(255, 80, 80))
-            self.results_table.setItem(i, 2, status_item)
-            self.results_table.setItem(i, 3, QTableWidgetItem(f"{r['time']:.3f}s"))
-
-        self.results_table.resizeColumnsToContents()
-        for col in range(self.results_table.columnCount()):
-            if self.results_table.columnWidth(col) > 400:
-                self.results_table.setColumnWidth(col, 400)
-        self.results_table.setSortingEnabled(True)
-        self._loading_results = False
+        # Build script sub-tabs (summary + per-SELECT result tabs)
+        self._enter_script_mode(results)
 
         # Update statistics
         success = sum(1 for r in results if r["success"])
@@ -1370,6 +1465,7 @@ class SQLTab(QWidget):
                           exec_time: float, fetch_time: float,
                           total_rows: int = 0) -> None:
         """Handle query completion."""
+        self._exit_script_mode()
         self._reset_buttons()
 
         # Log to database
@@ -1561,6 +1657,7 @@ class SQLTab(QWidget):
                         exec_time: float, fetch_time: float,
                         total_rows: int = 0) -> None:
         """Handle page load completion."""
+        self._exit_script_mode()
         self._reset_buttons()
 
         self._loading_results = True

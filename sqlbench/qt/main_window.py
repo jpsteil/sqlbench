@@ -8,7 +8,7 @@ and tabbed query/spool interface.
 import subprocess
 import threading
 from typing import Optional, Dict, Any
-from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QCloseEvent
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -141,25 +141,28 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
 
     def _restore_state(self) -> None:
-        """Restore window geometry and state."""
-        settings = QSettings("SQLBench", "SQLBench")
+        """Restore window size (position is compositor-controlled on Wayland)."""
+        w = get_setting("window_width")
+        h = get_setting("window_height")
 
-        # Restore geometry
-        geometry = settings.value("geometry")
-        if geometry:
-            self.restoreGeometry(geometry)
+        if w and h:
+            try:
+                w, h = int(w), int(h)
+                w = max(w, self.minimumWidth())
+                h = max(h, self.minimumHeight())
+                # Clamp to fit on screen
+                screen = QApplication.primaryScreen().availableGeometry()
+                w = min(w, screen.width())
+                h = min(h, screen.height())
+                self.resize(w, h)
+            except (ValueError, TypeError):
+                self.resize(1400, 900)
         else:
-            # Default size
             self.resize(1400, 900)
-            # Center on screen
-            screen = QApplication.primaryScreen().geometry()
-            self.move(
-                (screen.width() - self.width()) // 2,
-                (screen.height() - self.height()) // 2
-            )
 
         # Restore main splitter from ratio
         ratio_str = get_setting("layout_main_ratio")
+
         if ratio_str:
             try:
                 ratio = float(ratio_str)
@@ -209,9 +212,9 @@ class MainWindow(QMainWindow):
                 self._connect(last_conn)
 
     def _save_state(self) -> None:
-        """Save window geometry and state."""
-        settings = QSettings("SQLBench", "SQLBench")
-        settings.setValue("geometry", self.saveGeometry())
+        """Save window size and state."""
+        set_setting("window_width", str(self.width()))
+        set_setting("window_height", str(self.height()))
 
         # Save main splitter as ratio
         sizes = self.splitter.sizes()
@@ -331,13 +334,6 @@ class MainWindow(QMainWindow):
         """Reset window layout to defaults."""
         self.splitter.setSizes([250, 1000])
         self.resize(1400, 900)
-
-        # Center on screen
-        screen = QApplication.primaryScreen().geometry()
-        self.move(
-            (screen.width() - self.width()) // 2,
-            (screen.height() - self.height()) // 2
-        )
 
         set_setting("font_size", "13")
         self._apply_font_size()
