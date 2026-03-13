@@ -134,7 +134,7 @@ def _make_icon(shape: str, color: str = "#ddd", size: int = 18) -> QIcon:
 class QueryWorker(QThread):
     """Background thread for query execution."""
 
-    finished = pyqtSignal(object, object, float, float, int)  # results, description, exec_time, fetch_time, total_rows
+    finished = pyqtSignal(object, object, float, float, int, int)  # results, description, exec_time, fetch_time, total_rows, rowcount
     error = pyqtSignal(str)
     row_count = pyqtSignal(int)
 
@@ -212,16 +212,17 @@ class QueryWorker(QThread):
                 description = cursor.description
                 if total_rows == 0:
                     total_rows = len(rows)
+                rowcount = 0
             else:
                 rows = []
                 description = None
-                self.row_count.emit(cursor.rowcount)
+                rowcount = cursor.rowcount if cursor.rowcount >= 0 else 0
 
             fetch_time = time.time() - fetch_start
             cursor.close()
 
             if not self._cancelled:
-                self.finished.emit(rows, description, exec_time, fetch_time, total_rows)
+                self.finished.emit(rows, description, exec_time, fetch_time, total_rows, rowcount)
 
         except Exception as e:
             if not self._cancelled:
@@ -1463,7 +1464,7 @@ class SQLTab(QWidget):
 
     def _on_query_finished(self, rows: List, description: Any,
                           exec_time: float, fetch_time: float,
-                          total_rows: int = 0) -> None:
+                          total_rows: int = 0, rowcount: int = 0) -> None:
         """Handle query completion."""
         self._exit_script_mode()
         self._reset_buttons()
@@ -1471,11 +1472,12 @@ class SQLTab(QWidget):
         # Log to database
         try:
             db = _get_db()
+            log_row_count = len(rows) if rows else rowcount
             db.log_query(
                 self.connection_name,
                 self._last_sql,
                 duration=exec_time + fetch_time,
-                row_count=len(rows) if rows else 0,
+                row_count=log_row_count,
                 status="success"
             )
         except Exception as e:
@@ -1511,6 +1513,18 @@ class SQLTab(QWidget):
                 f"Showing {start:,}-{end:,} of {self._total_rows:,} row(s) "
                 f"(Page {self._current_page} of {total_pages}){edit_status}"
             )
+        elif description is None and rowcount >= 0:
+            # Non-SELECT statement (UPDATE/DELETE/INSERT)
+            sql_upper = self._last_sql.strip().upper()
+            if sql_upper.startswith("INSERT"):
+                status = f"{rowcount} row(s) inserted"
+            elif sql_upper.startswith("UPDATE"):
+                status = f"{rowcount} row(s) updated"
+            elif sql_upper.startswith("DELETE"):
+                status = f"{rowcount} row(s) deleted"
+            else:
+                status = f"{rowcount} row(s) affected"
+            self.results_status.setText(status)
         else:
             self.results_status.setText("No results")
 
@@ -1655,7 +1669,7 @@ class SQLTab(QWidget):
 
     def _on_page_loaded(self, rows: List, description: Any,
                         exec_time: float, fetch_time: float,
-                        total_rows: int = 0) -> None:
+                        total_rows: int = 0, rowcount: int = 0) -> None:
         """Handle page load completion."""
         self._exit_script_mode()
         self._reset_buttons()
